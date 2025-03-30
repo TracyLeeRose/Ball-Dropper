@@ -1,4 +1,4 @@
-# Ball Dropper (JavaScript Ball Game)
+# Ball Dropper
 
 A simple web-based physics game where you aim and shoot balls to destroy numbered polygons before they reach the top. Built with HTML, JavaScript, and the Matter.js physics engine.
 
