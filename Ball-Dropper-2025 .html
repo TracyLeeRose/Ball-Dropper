@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Polygon Ball Dropper - Difficulty Increment 3</title>
+    <style>
+        body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #e0e0e0; }
+        #gameContainer { position: relative; width: 356px; height: 760px; overflow: hidden; }
+        canvas { border: 1px solid black; background: #f0f0f0; position: absolute; top: 40px; left: 0; }
+        #banner { position: absolute; top: 0; left: 0; width: 100%; height: 30px; background: #333; color: white; font-family: Arial, sans-serif; font-size: 20px; text-align: center; line-height: 30px; z-index: 10; }
+        #gameOver { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Arial Black', Gadget, sans-serif; font-size: 50px; font-weight: bold; color: #CC0000; display: none; text-align: center; text-shadow: 3px 3px 5px rgba(0, 0, 0, 0.6); z-index: 100; width: 90%; }
+        #scoreDisplay { position: absolute; top: 65%; left: 50%; transform: translate(-50%, -50%); font-family: Arial, sans-serif; font-size: 26px; font-weight: bold; color: #CC0000; display: none; text-align: center; text-shadow: 2px 2px 3px rgba(0, 0, 0, 0.5); z-index: 100; }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="banner">Score: 0 | Balls: 1 | Round: 1</div>
+        <div id="gameOver">GAME OVER</div>
+        <div id="scoreDisplay">Score: 0</div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script>
+        try {
+            // Matter.js modules
+            const Engine = Matter.Engine, Render = Matter.Render, World = Matter.World, Bodies = Matter.Bodies, Events = Matter.Events, Vector = Matter.Vector;
+
+            // Engine setup
+            const engine = Engine.create({ timing: { timeScale: 1 }, positionIterations: 16, velocityIterations: 16, constraintIterations: 16 });
+            const world = engine.world;
+            engine.gravity.y = 1.5;
+
+            // Game constants
+            const CANVAS_WIDTH = 356, CANVAS_HEIGHT = 720, ROW_HEIGHT = 80, MAX_OBJECTS = 120, POLYGON_SPACING = 32;
+            const POLYGON_RADIUS = 20;
+            const CAGE_Y_POSITION = 45;
+            const CAGE_GAP_WIDTH = 36; // Wider gap
+            const CAGE_LINE_WIDTH = 2;
+            const FIXED_START_X = CANVAS_WIDTH / 2;
+
+            // Renderer setup
+            const render = Render.create({ element: document.getElementById('gameContainer'), engine: engine, options: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, wireframes: false, background: '#f0f0f0' } });
+            if (!render.canvas) throw new Error("Canvas failed to create");
+
+            // Collision categories
+            const defaultCategory = 0x0001, ballCategory = 0x0002;
+
+            // Game state variables
+            let score = 0, balls = [], usedBalls = [], polygons = [];
+            let gameOver = false, aiming = false, turnInProgress = false;
+            let startPos = { x: FIXED_START_X, y: 20 };
+            let aimLine = null, round = 1;
+            let currentLaunchCount = 1, nextRoundBallCount = 1;
+            let rowCount = 0;
+            let launchDirection = null;
+            const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96c93d', '#ffa502'];
+            const DIAMOND_COLOR = '#000000', ACTIVE_BALL_COLOR = '#ff4500', USED_BALL_COLOR = '#808080';
+            let fadeAlpha = 0, fadeDirection = 1, scoreFlashInterval = null, lastClickTime = 0;
+            const DOUBLE_CLICK_THRESHOLD = 300;
+
+            // Helper function to update banner text
+            function updateBanner() {
+                document.getElementById('banner').textContent = `Score: ${score} | Balls: ${nextRoundBallCount} | Round: ${round}`;
+            }
+
+            // Add world boundaries
+            World.add(world, [
+                Bodies.rectangle(-15, CANVAS_HEIGHT / 2, 30, CANVAS_HEIGHT, { isStatic: true, restitution: 1.0, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                Bodies.rectangle(CANVAS_WIDTH + 8, CANVAS_HEIGHT / 2, 30, CANVAS_HEIGHT, { isStatic: true, restitution: 1.0, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                Bodies.fromVertices(CANVAS_WIDTH / 4, -30, [{ x: -CANVAS_WIDTH / 2, y: 0 }, { x: CANVAS_WIDTH / 2, y: 0 }, { x: CANVAS_WIDTH / 4, y: 60 }], { isStatic: true, isSensor: true, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { fillStyle: '#808080' } }),
+                Bodies.fromVertices(3 * CANVAS_WIDTH / 4, -30, [{ x: -CANVAS_WIDTH / 4, y: 60 }, { x: CANVAS_WIDTH / 2, y: 0 }, { x: -CANVAS_WIDTH / 2, y: 0 }], { isStatic: true, isSensor: true, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { fillStyle: '#808080' } }),
+                Bodies.rectangle(CANVAS_WIDTH / 2, CANVAS_HEIGHT + 30, CANVAS_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory } })
+            ]);
+
+            // Function to create a ball
+            function createBall(x = FIXED_START_X, y = 20, isUsed = false) {
+                if (balls.length + usedBalls.length >= MAX_OBJECTS) return null;
+                const ball = Bodies.circle(x, y, 7.5, {
+                    restitution: 1.0, friction: 0.001, frictionStatic: 0.01, frictionAir: 0.005,
+                    slop: 0.02, density: 0.3,
+                    collisionFilter: { category: ballCategory, mask: defaultCategory },
+                    render: { fillStyle: isUsed ? USED_BALL_COLOR : ACTIVE_BALL_COLOR }
+                });
+                ball.isSettled = false; ball.isUsed = isUsed;
+                Matter.Body.setStatic(ball, isUsed);
+                if (isUsed) usedBalls.push(ball); else balls.push(ball);
+                World.add(world, ball); return ball;
+            }
+
+            // Function to create a row of polygons
+            function createPolygonRow(yPos) {
+                const newPolygons = []; const offset = (rowCount % 2 === 1) ? POLYGON_SPACING / 2 : 0;
+                const maxPolys = Math.floor((CANVAS_WIDTH - 40) / POLYGON_SPACING) + 1;
+                let diamondCount = 0;
+                for (let i = 0; i < maxPolys; i++) {
+                    const x = 20 + offset + (i * POLYGON_SPACING);
+                    if (x + POLYGON_RADIUS > CANVAS_WIDTH - 7 || polygons.length + newPolygons.length >= MAX_OBJECTS) break;
+                    let isDiamond = Math.random() < 0.2 && diamondCount < 2; if (isDiamond) diamondCount++;
+                    const sides = isDiamond ? 4 : Math.floor(Math.random() * 4) + 3;
+                    // --- MODIFIED: Value based on rowCount * 3 ---
+                    const value = isDiamond ? 0 : Math.max(1, (Math.floor(Math.random() * 3) + 1) + (rowCount * 3));
+                    // --- End Modification ---
+                    const color = isDiamond ? DIAMOND_COLOR : colors[Math.floor(Math.random() * colors.length)];
+                    const poly = Bodies.polygon(x, yPos, sides, POLYGON_RADIUS, {
+                        isStatic: true, value: value, originalValue: value, isDiamond: isDiamond,
+                        restitution: 1.0, friction: 0.01, frictionStatic: 0.05, slop: 0.02, density: 1.0,
+                        collisionFilter: { category: defaultCategory, mask: ballCategory | defaultCategory },
+                        render: {
+                            fillStyle: color,
+                            strokeStyle: isDiamond ? `rgba(255, 0, 0, ${fadeAlpha})` : null,
+                            lineWidth: isDiamond ? 2 : 0,
+                            text: value.toString(), textSize: 12, textColor: '#ffffff', textFont: 'Arial'
+                        }
+                    });
+                    newPolygons.push(poly);
+                }
+                polygons.push(...newPolygons); World.add(world, newPolygons);
+                rowCount++;
+            }
+
+            // Initial game setup
+            createBall(startPos.x, startPos.y, true);
+            createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT);
+            updateBanner();
+
+            // Collision handling
+            Events.on(engine, 'collisionStart', function(event) {
+                if (gameOver) return; const pairs = event.pairs;
+                pairs.forEach(pair => {
+                    let ball = null, other = null;
+                    if (balls.includes(pair.bodyA)) { ball = pair.bodyA; other = pair.bodyB; }
+                    else if (balls.includes(pair.bodyB)) { ball = pair.bodyB; other = pair.bodyA; }
+
+                    if (ball && !ball.isSettled && !ball.isUsed) {
+                        if (polygons.includes(other)) handlePolygonHit(ball, other);
+                        else if (other.isSensor && other.label === 'bottomSensor') setTimeout(() => settleBall(ball), 50);
+                    }
+                });
+            });
+
+             // Handle ball hitting a polygon
+             function handlePolygonHit(ball, poly) {
+                if (poly.isDiamond) {
+                    nextRoundBallCount++;
+                    updateBanner();
+                    World.remove(world, poly); polygons = polygons.filter(p => p !== poly);
+                } else {
+                    score++;
+                    poly.value = Math.max(0, Math.floor(poly.value - 1));
+                    poly.render.text = poly.value.toString();
+                    updateBanner();
+                }
+             }
+
+            // Settle a ball when it hits the bottom sensor
+            function settleBall(ball) {
+                if (!ball || ball.isSettled || ball.isUsed || gameOver) return;
+                const settlementPosition = { x: FIXED_START_X, y: startPos.y };
+
+                ball.isSettled = true; ball.isUsed = true;
+                Matter.Body.setStatic(ball, true);
+                Matter.Body.setVelocity(ball, { x: 0, y: 0 });
+                Matter.Body.setAngularVelocity(ball, 0);
+                Matter.Body.setPosition(ball, settlementPosition);
+                ball.render.fillStyle = USED_BALL_COLOR;
+
+                usedBalls.push(ball);
+                balls = balls.filter(b => b !== ball);
+
+                if (balls.length === 0 && usedBalls.length >= currentLaunchCount) {
+                    usedBalls.forEach(ub => {
+                         Matter.Body.setPosition(ub, settlementPosition);
+                    });
+                    startPos.x = settlementPosition.x;
+                    startPos.y = settlementPosition.y;
+                }
+            }
+
+            // Trigger game over state
+            function triggerGameOver(reason = "Game Over") {
+                if (gameOver) return;
+                gameOver = true; aiming = false; turnInProgress = false; engine.timing.timeScale = 1;
+                console.log("Game over triggered:", reason, "- Final Score:", score);
+                document.getElementById('gameOver').style.display = 'block';
+                document.getElementById('scoreDisplay').textContent = `Score: ${score}`;
+                document.getElementById('scoreDisplay').style.display = 'block';
+                if (aimLine) { World.remove(world, aimLine); aimLine = null; }
+                if (scoreFlashInterval) clearInterval(scoreFlashInterval);
+                let flashVisible = true; scoreFlashInterval = setInterval(() => { if (!gameOver) { clearInterval(scoreFlashInterval); document.getElementById('scoreDisplay').style.visibility = 'visible'; return; } flashVisible = !flashVisible; document.getElementById('scoreDisplay').style.visibility = flashVisible ? 'visible' : 'hidden'; }, 600);
+            }
+
+            // Game loop - before physics update
+            Events.on(engine, 'beforeUpdate', function() {
+                if (gameOver) return;
+                try {
+                    fadeAlpha = (fadeAlpha + fadeDirection * 0.02); if (fadeAlpha <= 0 || fadeAlpha >= 1) fadeDirection *= -1; fadeAlpha = Math.max(0, Math.min(1, fadeAlpha));
+
+                    for (let i = polygons.length - 1; i >= 0; i--) {
+                        const poly = polygons[i];
+                        if (poly.isDiamond) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
+
+                        if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) {
+                             return triggerGameOver(`Polygon reached cage line (y=${(poly.position.y - POLYGON_RADIUS).toFixed(1)})`);
+                        }
+
+                        if (poly.value <= 0 && !poly.isDiamond) {
+                             World.remove(world, poly); polygons.splice(i, 1);
+                        } else if (!poly.isDiamond) {
+                             poly.render.text = Math.floor(poly.value).toString();
+                        }
+                    }
+
+                    if (polygons.length > MAX_OBJECTS * 0.8) { const excess = polygons.length - Math.floor(MAX_OBJECTS * 0.8); const removedPolys = polygons.splice(0, excess); World.remove(world, removedPolys); }
+
+                    balls.forEach(ball => {
+                        if (!ball.isStatic && !ball.isSettled && !ball.isUsed) {
+                            const MAX_SPEED = 15; const MAX_SPEED_SQ = MAX_SPEED * MAX_SPEED; if (Vector.magnitudeSquared(ball.velocity) > MAX_SPEED_SQ) Matter.Body.setVelocity(ball, Vector.mult(Vector.normalise(ball.velocity), MAX_SPEED));
+                            const STUCK_SPEED_THRESHOLD = 0.1; const BOTTOM_ZONE_THRESHOLD = CANVAS_HEIGHT - 30;
+                            if (ball.position.y < BOTTOM_ZONE_THRESHOLD && ball.speed < STUCK_SPEED_THRESHOLD) {
+                                const shockVx = (Math.random() - 0.5) * 3; const shockVy = -2 - Math.random() * 2;
+                                Matter.Body.setVelocity(ball, { x: shockVx, y: shockVy });
+                            }
+                            if (ball.position.y > CANVAS_HEIGHT + 50) { console.warn(`Ball ${ball.id} fell through! Forcing settlement.`); settleBall(ball); }
+                        }
+                    });
+
+                    if (turnInProgress && balls.length === 0) {
+                        turnInProgress = false; aiming = false;
+                        setTimeout(() => { if (!gameOver && balls.length === 0 && usedBalls.length >= currentLaunchCount) { engine.timing.timeScale = 1; endTurn(); } }, 500);
+                    }
+                } catch (error) { console.error("Update loop error:", error); triggerGameOver("Update loop error"); }
+            });
+
+            // Mouse input handling
+            let mousePos = { x: 0, y: 0 };
+            render.canvas.addEventListener('mousedown', (e) => { if (!gameOver && e.button === 0 && !aiming && !turnInProgress && usedBalls.length > 0) { aiming = true; mousePos = { x: e.offsetX, y: e.offsetY }; } });
+            render.canvas.addEventListener('mousemove', (e) => { if (aiming && !gameOver) mousePos = { x: e.offsetX, y: e.offsetY }; });
+            render.canvas.addEventListener('click', (e) => { if (!gameOver && turnInProgress) { const currentTime = Date.now(); if (currentTime - lastClickTime < DOUBLE_CLICK_THRESHOLD) { engine.timing.timeScale = (engine.timing.timeScale === 1) ? 4 : 1; lastClickTime = 0; } else { lastClickTime = currentTime; } } else { lastClickTime = Date.now(); } });
+
+            // Custom rendering (after Matter.js rendering)
+            Events.on(render, 'afterRender', function() {
+                try {
+                    const context = render.context; context.globalCompositeOperation = 'source-over';
+
+                    polygons.forEach(poly => {
+                        if (poly.render.text && !poly.isDiamond) {
+                            context.font = `${poly.render.textSize}px ${poly.render.textFont}`;
+                            context.fillStyle = poly.render.textColor;
+                            context.textAlign = 'center'; context.textBaseline = 'middle';
+                            context.fillText(poly.render.text, poly.position.x, poly.position.y);
+                        }
+                    });
+
+                    // Draw Cage Lines
+                    if (!gameOver) {
+                        context.beginPath();
+                        context.strokeStyle = '#000000';
+                        context.lineWidth = CAGE_LINE_WIDTH;
+                        context.setLineDash([]);
+
+                        const leftLineStartX = 0;
+                        const leftLineEndX = startPos.x - CAGE_GAP_WIDTH / 2;
+                        context.moveTo(leftLineStartX, CAGE_Y_POSITION);
+                        context.lineTo(leftLineEndX, CAGE_Y_POSITION);
+
+                        const rightLineStartX = startPos.x + CAGE_GAP_WIDTH / 2;
+                        const rightLineEndX = CANVAS_WIDTH;
+                        context.moveTo(rightLineStartX, CAGE_Y_POSITION);
+                        context.lineTo(rightLineEndX, CAGE_Y_POSITION);
+
+                        context.stroke();
+                    }
+
+                    // Draw aiming line
+                    if (aiming) {
+                        context.beginPath();
+                        context.strokeStyle = '#000000';
+                        context.lineWidth = 2;
+                        context.setLineDash([10, 5]);
+                        const dx = mousePos.x - startPos.x; const dy = mousePos.y - startPos.y;
+                        if (dy > -50) {
+                            const angle = Math.atan2(dy, dx);
+                            if (!(angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05)) {
+                                const length = Math.min(Math.sqrt(dx * dx + dy * dy), 200);
+                                context.moveTo(startPos.x, startPos.y);
+                                context.lineTo(startPos.x + Math.cos(angle) * length, startPos.y + Math.sin(angle) * length);
+                                context.stroke();
+                            }
+                        }
+                        context.setLineDash([]);
+                    }
+                } catch (error) { console.error('Rendering error:', error); }
+            });
+
+            // Launch balls on mouse release
+            render.canvas.addEventListener('mouseup', (e) => {
+                if (aiming && e.button === 0 && !gameOver) {
+                    aiming = false; const endPos = { x: e.offsetX, y: e.offsetY }; const direction = Vector.sub(endPos, startPos); const magnitudeSquared = Vector.magnitudeSquared(direction);
+
+                    if (direction.y > -50 && magnitudeSquared > 50) {
+                        const angle = Math.atan2(direction.y, direction.x);
+                        if (angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05) return;
+
+                        turnInProgress = true; engine.timing.timeScale = 1;
+                        const launchMagnitude = 12;
+                        launchDirection = Vector.mult(Vector.normalise(direction), launchMagnitude);
+
+                        const countToLaunch = Math.min(usedBalls.length, currentLaunchCount);
+                        if (countToLaunch === 0) { console.error("Launch Error: No balls available!"); turnInProgress = false; return; }
+
+                        const ballsToLaunch = usedBalls.splice(0, countToLaunch);
+                        ballsToLaunch.forEach((ball, index) => {
+                            balls.push(ball); ball.isSettled = false; ball.isUsed = false; ball.render.fillStyle = ACTIVE_BALL_COLOR;
+                            setTimeout(() => {
+                                if (!gameOver) {
+                                     Matter.Body.setPosition(ball, startPos);
+                                     Matter.Body.setStatic(ball, false);
+                                     Matter.Body.setVelocity(ball, launchDirection);
+                                     Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
+                                }
+                            }, index * 80);
+                        });
+                    } else { aiming = false; }
+                } else if (aiming) { aiming = false; }
+            });
+
+            // Right-click to restart game
+            render.canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); console.log(">>> Context menu triggered - RESTARTING <<<"); restartGame(); });
+
+            // Function to restart the game
+            function restartGame() {
+                console.log("Executing restartGame...");
+                if (scoreFlashInterval) clearInterval(scoreFlashInterval); scoreFlashInterval = null;
+                World.clear(world); Engine.clear(engine);
+
+                score = 0; balls = []; usedBalls = []; polygons = [];
+                gameOver = false; aiming = false; turnInProgress = false;
+                currentLaunchCount = 1; nextRoundBallCount = 1; round = 1;
+                rowCount = 0;
+                launchDirection = null;
+                startPos = { x: FIXED_START_X, y: 20 };
+                engine.timing.timeScale = 1;
+
+                document.getElementById('gameOver').style.display = 'none';
+                document.getElementById('scoreDisplay').style.display = 'none';
+                document.getElementById('scoreDisplay').style.visibility = 'visible';
+                updateBanner();
+
+                World.add(world, [
+                    Bodies.rectangle(-15, CANVAS_HEIGHT / 2, 30, CANVAS_HEIGHT, { isStatic: true, restitution: 1.0, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                    Bodies.rectangle(CANVAS_WIDTH + 8, CANVAS_HEIGHT / 2, 30, CANVAS_HEIGHT, { isStatic: true, restitution: 1.0, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                    Bodies.fromVertices(CANVAS_WIDTH / 4, -30, [{ x: -CANVAS_WIDTH / 2, y: 0 }, { x: CANVAS_WIDTH / 2, y: 0 }, { x: CANVAS_WIDTH / 4, y: 60 }], { isStatic: true, isSensor: true, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { fillStyle: '#808080' } }),
+                    Bodies.fromVertices(3 * CANVAS_WIDTH / 4, -30, [{ x: -CANVAS_WIDTH / 4, y: 60 }, { x: CANVAS_WIDTH / 2, y: 0 }, { x: -CANVAS_WIDTH / 2, y: 0 }], { isStatic: true, isSensor: true, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { fillStyle: '#808080' } }),
+                    Bodies.rectangle(CANVAS_WIDTH / 2, CANVAS_HEIGHT + 30, CANVAS_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory } })
+                ]);
+
+                for (let i = 0; i < currentLaunchCount; i++) createBall(startPos.x, startPos.y, true);
+                createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT);
+                console.log("Game restarted. Ready balls:", usedBalls.length);
+            }
+
+            // Function called at the end of a turn
+            function endTurn() {
+                if (gameOver) return;
+                console.log(`Executing endTurn for end of round ${round}. Current rowCount: ${rowCount}`);
+                const newBallCount = nextRoundBallCount;
+                console.log(`Next round balls = ${newBallCount} (calculated during round)`);
+                World.remove(world, usedBalls); usedBalls = []; balls = [];
+                const ballsToCreate = Math.min(newBallCount, MAX_OBJECTS - polygons.length);
+
+                startPos.x = FIXED_START_X;
+                for (let i = 0; i < ballsToCreate; i++) createBall(startPos.x, startPos.y, true);
+
+                if (ballsToCreate < newBallCount) console.warn(`Ball creation capped at ${ballsToCreate} due to MAX_OBJECTS limit.`);
+
+                polygons.forEach(poly => Matter.Body.translate(poly, { x: 0, y: -ROW_HEIGHT }));
+
+                for (const poly of polygons) {
+                    if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) {
+                         triggerGameOver(`Polygon reached cage line after move (y=${(poly.position.y - POLYGON_RADIUS).toFixed(1)})`);
+                         return;
+                    }
+                }
+
+                if (!gameOver && polygons.length < MAX_OBJECTS * 0.8) {
+                    createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT);
+                }
+
+                currentLaunchCount = ballsToCreate;
+                nextRoundBallCount = ballsToCreate;
+                round++;
+                lastClickTime = 0;
+                turnInProgress = false; aiming = false; engine.timing.timeScale = 1;
+                updateBanner();
+                console.log(`Starting round ${round}. Balls available: ${currentLaunchCount}. Ready balls count: ${usedBalls.length}`);
+            }
+
+            // Start the engine and renderer
+            Engine.run(engine);
+            Render.run(render);
+            console.log("Game Initialized. Engine and Renderer running.");
+
+        } catch (error) {
+            console.error('Game failed to initialize:', error);
+            document.body.innerHTML += `<p style="color: red;">Error loading game: ${error.message}. Check console.</p>`;
+        }
+    </script>
+</body>
+</html>
