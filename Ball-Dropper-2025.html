@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Polygon Ball Dropper - Re-Aim Fixes</title>
+    <title>Polygon Ball Dropper</title>
     <style>
         body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #e0e0e0; }
         #gameContainer { position: relative; width: 356px; height: 760px; overflow: hidden; }
@@ -34,6 +34,7 @@
             const CAGE_GAP_WIDTH = 36;
             const CAGE_LINE_WIDTH = 2;
             const FIXED_START_X = CANVAS_WIDTH / 2;
+            const LAUNCH_MAGNITUDE = 16; // Consistent launch speed
 
             const render = Render.create({
                 element: document.getElementById('gameContainer'),
@@ -46,25 +47,29 @@
 
             let score = 0, balls = [], usedBalls = [], polygons = [];
             let gameOver = false, aiming = false, turnInProgress = false;
-            let isReAiming = false;
+            let isPausing = false; // Used when pausing mid-turn
             let startPos = { x: FIXED_START_X, y: 20 };
             let aimLine = null, round = 1;
             let currentLaunchCount = 1, nextRoundBallCount = 1;
             let rowCount = 0;
-            let launchDirection = null; // Stores the current valid launch direction for the turn
+            let launchDirection = null; // Stores the initial launch direction for the turn
             const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96c93d', '#ffa502'];
             const DIAMOND_COLOR = '#000000', ACTIVE_BALL_COLOR = '#ff4500', USED_BALL_COLOR = '#808080';
             let fadeAlpha = 0, fadeDirection = 1, scoreFlashInterval = null;
 
-            // Anti-Stuck & Re-Aim Grace Period
+            // Anti-Stuck & Pause Grace Period
             const STUCK_SPEED_THRESHOLD = 0.15;
             const STUCK_ESCAPE_ZONE_Y = CANVAS_HEIGHT - 40;
             const STUCK_KICK_VY_MIN = -0.8;
             const STUCK_KICK_VY_RAND = 1.0;
             const STUCK_KICK_VX_AMP = 0.5;
-            let reAimGraceTicks = 0; // Counter for grace period after re-aiming
-            const REAIM_GRACE_TICKS_TOTAL = 5; // How many physics ticks to ignore anti-stuck after re-aim
+            let pauseResumeGraceTicks = 0; // Counter for grace period after resuming from pause
+            const PAUSE_RESUME_GRACE_TICKS_TOTAL = 5; // How many physics ticks to ignore anti-stuck after resume
 
+            // Speed Up Feature
+            let isSpedUp = false;
+            let lastRightClickTime = 0;
+            const DOUBLE_CLICK_THRESHOLD = 500; // milliseconds
 
             function updateBanner() {
                 document.getElementById('banner').textContent = `Score: ${score} | Balls: ${nextRoundBallCount} | Round: ${round}`;
@@ -78,7 +83,7 @@
             ]);
 
             // --- Ball Creation ---
-            function createBall(x = FIXED_START_X, y = 20, isUsed = false) { /* ... unchanged ... */
+            function createBall(x = FIXED_START_X, y = 20, isUsed = false) {
                 if (balls.length + usedBalls.length >= MAX_OBJECTS) return null;
                 const ball = Bodies.circle(x, y, 7.5, {
                     restitution: 0.85, friction: 0.001, frictionStatic: 0.01, frictionAir: 0.005,
@@ -87,6 +92,8 @@
                     render: { fillStyle: isUsed ? USED_BALL_COLOR : ACTIVE_BALL_COLOR }
                 });
                 ball.isSettled = false; ball.isUsed = isUsed;
+                // Add properties for pause/resume velocity storage
+                ball.pausedVelocity = null; ball.pausedAngularVelocity = null;
                 Matter.Body.setStatic(ball, isUsed);
                 if (isUsed) usedBalls.push(ball); else balls.push(ball);
                 World.add(world, ball);
@@ -94,7 +101,7 @@
             }
 
             // --- Polygon Creation ---
-             function createPolygonRow(yPos) { /* ... unchanged (using render.textValue etc.) ... */
+             function createPolygonRow(yPos) {
                 const newPolygons = [];
                 const offset = (rowCount % 2 === 1) ? POLYGON_SPACING / 2 : 0;
                 const maxPolys = Math.floor((CANVAS_WIDTH - 50) / POLYGON_SPACING) + 1;
@@ -134,8 +141,8 @@
             updateBanner();
 
             // --- Collision Handling ---
-            Events.on(engine, 'collisionStart', function(event) { /* ... unchanged ... */
-                if (gameOver || isReAiming) return;
+            Events.on(engine, 'collisionStart', function(event) {
+                if (gameOver || isPausing) return; // Ignore collisions during pause
                 const pairs = event.pairs;
                 pairs.forEach(pair => {
                     let ball = null, other = null;
@@ -146,33 +153,40 @@
                         if (polygons.includes(other)) {
                             handlePolygonHit(ball, other);
                         } else if (other.isSensor && other.label === 'bottomSensor') {
-                            setTimeout(() => { if (!isReAiming && !ball.isSettled) settleBall(ball); }, 50);
+                            // Delay slightly to ensure it wasn't just a graze
+                            setTimeout(() => { if (!isPausing && !ball.isSettled) settleBall(ball); }, 50);
                         }
                     }
                 });
             });
 
-            function handlePolygonHit(ball, poly) { /* ... unchanged ... */
+            function handlePolygonHit(ball, poly) {
                  if (poly.isDiamond) {
                     nextRoundBallCount++; updateBanner();
                     World.remove(world, poly); polygons = polygons.filter(p => p !== poly);
                 } else {
                     score++;
-                    poly.value = Math.max(0, Math.floor(poly.value - 1));
+                    const damage = 1; // Standard damage
+                    poly.value = Math.max(0, Math.floor(poly.value - damage));
+
                     if (poly.render) { poly.render.textValue = poly.value.toString(); } // Update custom text property
                     updateBanner();
                 }
             }
 
             // --- Ball Settlement Logic ---
-            function settleBall(ball) { /* ... unchanged ... */
-                 if (!ball || ball.isSettled || ball.isUsed || gameOver || isReAiming) return;
+            function settleBall(ball) {
+                 if (!ball || ball.isSettled || ball.isUsed || gameOver || isPausing) return;
                 const settlementPosition = { x: FIXED_START_X, y: startPos.y };
                 ball.isSettled = true; ball.isUsed = true;
+                // Clear any stored pause velocity
+                delete ball.pausedVelocity;
+                delete ball.pausedAngularVelocity;
                 Matter.Body.setStatic(ball, true); Matter.Body.setVelocity(ball, { x: 0, y: 0 }); Matter.Body.setAngularVelocity(ball, 0);
-                Matter.Body.setPosition(ball, settlementPosition); ball.render.fillStyle = USED_BALL_COLOR;
+                Matter.Body.setPosition(ball, settlementPosition); ball.render.fillStyle = USED_BALL_COLOR; // Reset color
                 usedBalls.push(ball); balls = balls.filter(b => b !== ball);
                 if (balls.length === 0 && usedBalls.length >= currentLaunchCount) {
+                    // Ensure all visual representations are at the start point
                     usedBalls.forEach(ub => Matter.Body.setPosition(ub, settlementPosition));
                     startPos.x = settlementPosition.x; startPos.y = settlementPosition.y;
                     checkEndTurnCondition();
@@ -180,11 +194,12 @@
             }
 
              // --- Check End Turn Condition ---
-             function checkEndTurnCondition() { /* ... unchanged ... */
-                 if (!gameOver && !isReAiming && turnInProgress && balls.length === 0 && usedBalls.length >= currentLaunchCount) {
-                    turnInProgress = false; aiming = false; isReAiming = false;
+             function checkEndTurnCondition() {
+                 if (!gameOver && !isPausing && turnInProgress && balls.length === 0 && usedBalls.length >= currentLaunchCount) {
+                    turnInProgress = false; aiming = false; isPausing = false;
+                    // Short delay to allow last ball settling visually before turn ends
                     setTimeout(() => {
-                        if (!gameOver && !isReAiming && balls.length === 0 && usedBalls.length >= currentLaunchCount) {
+                        if (!gameOver && !isPausing && balls.length === 0 && usedBalls.length >= currentLaunchCount) {
                              endTurn();
                         }
                     }, 300);
@@ -192,11 +207,12 @@
              }
 
             // --- Game Over Logic ---
-            function triggerGameOver(reason = "Game Over") { /* ... unchanged ... */
+            function triggerGameOver(reason = "Game Over") {
                 if (gameOver) return;
-                gameOver = true; aiming = false; isReAiming = false; turnInProgress = false;
-                reAimGraceTicks = 0; // Reset grace period on game over
-                engine.timing.timeScale = 1;
+                gameOver = true; aiming = false; isPausing = false; turnInProgress = false;
+                pauseResumeGraceTicks = 0; // Reset grace period on game over
+                isSpedUp = false; // Reset speed up state
+                engine.timing.timeScale = 1; // Ensure time scale is normal
                 console.log("Game over triggered:", reason, "- Final Score:", score);
                 document.getElementById('gameOver').style.display = 'block';
                 document.getElementById('scoreDisplay').textContent = `Score: ${score}`;
@@ -208,64 +224,85 @@
                     if (!gameOver) { clearInterval(scoreFlashInterval); document.getElementById('scoreDisplay').style.visibility = 'visible'; return; }
                     flashVisible = !flashVisible; document.getElementById('scoreDisplay').style.visibility = flashVisible ? 'visible' : 'hidden';
                 }, 600);
+                // Add message for restart option
+                document.getElementById('gameOver').innerHTML = 'GAME OVER<br><span style="font-size: 20px;">Right-click to restart</span>';
              }
 
             // --- Main Game Loop (Before Update) ---
             Events.on(engine, 'beforeUpdate', function() {
                 if (gameOver) return;
 
-                // Decrement re-aim grace ticks if active
-                if (reAimGraceTicks > 0) {
-                    reAimGraceTicks--;
-                    // console.log(`Grace ticks remaining: ${reAimGraceTicks}`);
+                // Decrement pause resume grace ticks if active
+                if (pauseResumeGraceTicks > 0) {
+                    pauseResumeGraceTicks--;
                 }
 
-                if (isReAiming) { // Pause logic
+                // --- Pause Logic ---
+                if (isPausing) {
+                     // Update visual elements that should continue during pause (like diamond flicker)
                      fadeAlpha = fadeAlpha + fadeDirection * 0.02; if (fadeAlpha <= 0 || fadeAlpha >= 1) fadeDirection *= -1; fadeAlpha = Math.max(0, Math.min(1, fadeAlpha));
-                     for (let i = polygons.length - 1; i >= 0; i--) {
-                         const poly = polygons[i];
+                     polygons.forEach(poly => {
                          if (poly.isDiamond) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
-                         if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) return triggerGameOver(`Polygon reached cage line during re-aim`);
-                     }
-                     return; // Skip physics simulation during pause
+                         // Check for game over condition even during pause (e.g., if something shifted unexpectedly)
+                         if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) return triggerGameOver(`Polygon reached cage line during pause`);
+                     });
+                     // Skip the rest of the physics/game logic update
+                     return;
                 }
 
                 // --- Normal Update Logic ---
                 try {
+                    // Update diamond flicker alpha
                     fadeAlpha = fadeAlpha + fadeDirection * 0.02; if (fadeAlpha <= 0 || fadeAlpha >= 1) fadeDirection *= -1; fadeAlpha = Math.max(0, Math.min(1, fadeAlpha));
-                    // Polygon checks
-                    for (let i = polygons.length - 1; i >= 0; i--) { /* ... unchanged ... */
+
+                    // Polygon checks and updates
+                    for (let i = polygons.length - 1; i >= 0; i--) {
                         const poly = polygons[i];
+                        // Apply flicker effect
                         if (poly.isDiamond) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
+                        // Check game over condition
                         if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) return triggerGameOver(`Polygon reached cage line`);
+                        // Remove destroyed polygons
                         if (poly.value <= 0 && !poly.isDiamond) { World.remove(world, poly); polygons.splice(i, 1); }
+                        // Update text value render property
                         else if (!poly.isDiamond && poly.render) { poly.render.textValue = Math.floor(poly.value).toString(); }
                     }
-                    // Polygon Culling
+                    // Polygon Culling (if needed, though MAX_OBJECTS should handle it)
                     if (polygons.length > MAX_OBJECTS * 0.85) { const excess = polygons.length - Math.floor(MAX_OBJECTS * 0.85); const removedPolys = polygons.splice(0, excess); World.remove(world, removedPolys); }
 
-                    // Ball physics and anti-stuck logic
+                    // Ball physics, anti-stuck, and color logic
                     balls.forEach(ball => {
                         if (!ball.isStatic && !ball.isSettled && !ball.isUsed) {
+                            // Speed cap
                             const MAX_SPEED = 15; const MAX_SPEED_SQ = MAX_SPEED * MAX_SPEED;
                             if (Vector.magnitudeSquared(ball.velocity) > MAX_SPEED_SQ) Matter.Body.setVelocity(ball, Vector.mult(Vector.normalise(ball.velocity), MAX_SPEED));
 
+                            // Ensure balls have the standard active color
+                            if (ball.render.fillStyle !== ACTIVE_BALL_COLOR) {
+                                ball.render.fillStyle = ACTIVE_BALL_COLOR;
+                            }
+
+
                             // --- Anti-Stuck Logic (with Grace Period Check) ---
-                            if (reAimGraceTicks <= 0 && ball.speed < STUCK_SPEED_THRESHOLD && ball.position.y < STUCK_ESCAPE_ZONE_Y) {
+                            if (pauseResumeGraceTicks <= 0 && ball.speed < STUCK_SPEED_THRESHOLD && ball.position.y < STUCK_ESCAPE_ZONE_Y) {
                                 const kickVx = (Math.random() - 0.5) * STUCK_KICK_VX_AMP;
                                 const kickVy = STUCK_KICK_VY_MIN - (Math.random() * STUCK_KICK_VY_RAND);
                                 Matter.Body.setVelocity(ball, Vector.add(ball.velocity, { x: kickVx, y: kickVy }));
-                                // console.log(`Kicking ball ${ball.id}`);
+                                // console.log(`Kicking stuck ball ${ball.id}`);
                             }
 
-                            // Wall checks
+                            // Wall boundary checks (simple position correction and velocity dampening)
                             if (ball.position.x < 7.5) { Matter.Body.setPosition(ball, { x: 7.5, y: ball.position.y }); Matter.Body.setVelocity(ball, { x: Math.abs(ball.velocity.x) * 0.6, y: ball.velocity.y }); }
                             else if (ball.position.x > CANVAS_WIDTH - 7.5) { Matter.Body.setPosition(ball, { x: CANVAS_WIDTH - 7.5, y: ball.position.y }); Matter.Body.setVelocity(ball, { x: -Math.abs(ball.velocity.x) * 0.6, y: ball.velocity.y }); }
-                            // Safety net
+                            // Safety net for balls falling through floor
                             if (ball.position.y > CANVAS_HEIGHT + 50) { console.warn(`Ball ${ball.id} fell through! Forcing settlement.`); settleBall(ball); }
                         }
                     });
-                    // checkEndTurnCondition(); // Fallback check
+
+                    // Check if turn should end naturally (all balls settled)
+                    if (turnInProgress && balls.length === 0 && !isPausing) {
+                         checkEndTurnCondition();
+                    }
 
                 } catch (error) { console.error("Update loop error:", error); triggerGameOver("Update loop error"); }
             });
@@ -273,98 +310,174 @@
             // --- Mouse and Input Handling ---
             let mousePos = { x: 0, y: 0 };
 
-            render.canvas.addEventListener('mousedown', (e) => { /* ... unchanged ... */
-                if (gameOver || e.button !== 0) return;
-                mousePos = { x: e.offsetX, y: e.offsetY };
-                if (turnInProgress && balls.length > 0) { // Start Re-Aim
-                    isReAiming = true; aiming = false;
-                    console.log("Re-aiming: Setting active balls static.");
-                    reAimGraceTicks = 0; // Reset grace ticks when starting re-aim
-                    balls.forEach(ball => { if (!ball.isStatic && !ball.isSettled && !ball.isUsed) Matter.Body.setStatic(ball, true); });
-                } else if (!aiming && !turnInProgress && usedBalls.length > 0) { // Start Initial Aim
-                    aiming = true; isReAiming = false;
+            render.canvas.addEventListener('mousedown', (e) => {
+                // --- Left Click Logic (Pause/Aim Start) ---
+                if (e.button === 0) {
+                    if (gameOver) return; // Ignore left clicks if game over
+
+                    mousePos = { x: e.offsetX, y: e.offsetY };
+
+                    if (turnInProgress && balls.length > 0) { // Start Pause during turn
+                        if (!isPausing) { // Only pause if not already pausing
+                            isPausing = true; aiming = false; // Set pausing, aiming is false (we are not starting a *new* aim)
+                            console.log("Pausing turn: Storing velocities and setting static.");
+                            pauseResumeGraceTicks = 0; // Reset grace ticks when starting pause
+                            balls.forEach(ball => {
+                                if (!ball.isStatic && !ball.isSettled && !ball.isUsed) {
+                                    // Store current velocity before freezing
+                                    ball.pausedVelocity = Vector.clone(ball.velocity);
+                                    ball.pausedAngularVelocity = ball.angularVelocity;
+                                    Matter.Body.setStatic(ball, true);
+                                }
+                            });
+                            // No need to remove aimLine here, it's useful during pause
+                        }
+                    } else if (!aiming && !turnInProgress && usedBalls.length > 0) { // Start Initial Aim
+                        aiming = true; isPausing = false;
+                    }
+                }
+                // --- Right Click Logic (Restart/Speed Toggle) ---
+                else if (e.button === 2) {
+                    e.preventDefault(); // Prevent context menu regardless of game state
+
+                    if (gameOver) {
+                        // If game is over, right-click restarts
+                        restartGame();
+                    } else {
+                        // If game is active, handle double-click for speed toggle
+                        const currentTime = Date.now();
+                        const timeDiff = currentTime - lastRightClickTime;
+
+                        if (timeDiff < DOUBLE_CLICK_THRESHOLD) {
+                            // Double click detected during active game
+                            if (!isPausing) { // Only toggle speed if not paused
+                                isSpedUp = !isSpedUp;
+                                engine.timing.timeScale = isSpedUp ? 3 : 1;
+                                console.log(`Game speed toggled. Time scale: ${engine.timing.timeScale}`);
+                            }
+                            // Reset time to prevent triple+ clicks counting as double
+                            lastRightClickTime = 0;
+                        } else {
+                            // First click (or click after threshold) during active game
+                            lastRightClickTime = currentTime;
+                        }
+                    }
                 }
              });
 
-            render.canvas.addEventListener('mousemove', (e) => { /* ... unchanged ... */
-                 if ((aiming || isReAiming) && !gameOver) mousePos = { x: e.offsetX, y: e.offsetY };
+            render.canvas.addEventListener('mousemove', (e) => {
+                 // Update mouse position only if aiming initially or if pausing (to show aim line during pause)
+                 if ((aiming || isPausing) && !gameOver) mousePos = { x: e.offsetX, y: e.offsetY };
             });
 
             render.canvas.addEventListener('mouseup', (e) => {
-                if (gameOver || e.button !== 0) return;
+                if (gameOver || e.button !== 0) return; // Only process left mouse button release during active game
                 const endPos = { x: e.offsetX, y: e.offsetY };
 
-                if (isReAiming) { // --- Execute Re-Aim ---
-                    isReAiming = false; // Re-aim attempt finished
-                    let launchIsValid = false;
-                    let newLaunchDirection = null; // Temporary variable for this function scope
-                    const direction = Vector.sub(endPos, startPos); const magnitudeSquared = Vector.magnitudeSquared(direction);
+                if (isPausing) { // --- Resume from Pause with RE-AIM ---
+                    isPausing = false; // Pause finished
+                    console.log("Resuming turn with re-aim.");
 
-                    if (direction.y > -50 && magnitudeSquared > 40 * 40) {
+                    // Calculate the NEW launch direction based on mouse release ONCE
+                    const direction = Vector.sub(endPos, startPos);
+                    const magnitudeSquared = Vector.magnitudeSquared(direction);
+                    let newLaunchVelocity = null; // Assume invalid initially
+                    let reAimIsValid = false; // Flag for validity
+
+                    // Validate the re-aim direction (similar to initial launch)
+                    if (direction.y > -50 && magnitudeSquared > 20 * 20) { // Check minimum drag and downward direction
                         const angle = Math.atan2(direction.y, direction.x);
-                        if (!(angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05)) {
-                            launchIsValid = true; const launchMagnitude = 16;
-                            newLaunchDirection = Vector.mult(Vector.normalise(direction), launchMagnitude);
-                            launchDirection = newLaunchDirection; // *** STORE the new direction globally for the turn ***
-                            console.log(`Re-launch VALID. New Turn Direction: {x: ${launchDirection.x.toFixed(2)}, y: ${launchDirection.y.toFixed(2)}}`);
-                        } else { console.log("Re-aim cancelled - invalid angle."); }
-                    } else { console.log("Re-aim cancelled - drag/direction invalid."); }
+                        if (!(angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05)) { // Check angle is not too upward
+                            // Re-aim is valid, calculate the velocity vector
+                            newLaunchVelocity = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
+                            reAimIsValid = true;
+                            console.log(`Re-aim Direction Valid: {x: ${newLaunchVelocity.x.toFixed(2)}, y: ${newLaunchVelocity.y.toFixed(2)}}`);
+                        } else {
+                            console.log("Re-aim cancelled - invalid angle (too upward). Restoring original velocity.");
+                        }
+                    } else {
+                        console.log("Re-aim cancelled - drag distance/direction invalid. Restoring original velocity.");
+                    }
 
-                    const ballsToProcess = balls.slice();
+                    // Unfreeze the balls and apply either the NEW or ORIGINAL velocity
+                    const ballsToProcess = balls.slice(); // Process currently active balls
                     ballsToProcess.forEach((ball) => {
-                        if (ball.isStatic && !ball.isSettled && !ball.isUsed) {
-                             Matter.Body.setStatic(ball, false); // Unfreeze
-                             if (launchIsValid && launchDirection) { // Use the updated global launchDirection
-                                 Matter.Body.setVelocity(ball, launchDirection); // Apply new direction
-                                 Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
-                                 reAimGraceTicks = REAIM_GRACE_TICKS_TOTAL; // Start grace period ONLY if launch was valid
-                             } else { // Invalid re-aim, just let it fall
-                                 Matter.Body.setVelocity(ball, {x: (Math.random()-0.5)*0.1, y: 0.1});
-                                 Matter.Body.setAngularVelocity(ball, 0);
+                        // Only unfreeze balls that were actually paused (have stored velocity)
+                        if (ball.isStatic && !ball.isSettled && !ball.isUsed && ball.pausedVelocity) {
+                             Matter.Body.setStatic(ball, false); // Unfreeze first
+
+                             if (reAimIsValid && newLaunchVelocity) { // Check the flag and that velocity exists
+                                 // Apply the NEW velocity from re-aim
+                                 Matter.Body.setVelocity(ball, newLaunchVelocity); // Use the calculated velocity
+                                 Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05); // Give a little spin
+                             } else {
+                                 // Apply the ORIGINAL stored velocity if re-aim was invalid
+                                 Matter.Body.setVelocity(ball, ball.pausedVelocity);
+                                 Matter.Body.setAngularVelocity(ball, ball.pausedAngularVelocity || 0);
                              }
+                             // Clear the stored properties regardless
+                             delete ball.pausedVelocity;
+                             delete ball.pausedAngularVelocity;
+                        } else if (ball.isStatic && !ball.isSettled && !ball.isUsed) {
+                             // Fallback if pausedVelocity wasn't stored (shouldn't happen often)
+                             console.warn(`Ball ${ball.id} was static but had no pausedVelocity. Unfreezing only.`);
+                             Matter.Body.setStatic(ball, false);
+                             delete ball.pausedVelocity; // Clean up just in case
+                             delete ball.pausedAngularVelocity;
                         }
                     });
                     // Turn remains in progress
+                    pauseResumeGraceTicks = PAUSE_RESUME_GRACE_TICKS_TOTAL; // Apply grace period after resuming
 
                 } else if (aiming) { // --- Execute Initial Launch ---
-                    aiming = false;
-                    let initialLaunchDirection = null; // Local to this block
+                    aiming = false; // Aiming phase is over
                     const direction = Vector.sub(endPos, startPos); const magnitudeSquared = Vector.magnitudeSquared(direction);
-                    if (direction.y > -50 && magnitudeSquared > 40 * 40) {
+                    // Check for valid launch direction (not too shallow, sufficient drag distance)
+                    if (direction.y > -50 && magnitudeSquared > 40 * 40) { // Ensure some downward component and minimum drag
                         const angle = Math.atan2(direction.y, direction.x);
+                        // Prevent launching almost straight up or into the top corners
                         if (!(angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05)) {
-                            turnInProgress = true; reAimGraceTicks = 0; // Reset grace ticks on new launch
-                            const launchMagnitude = 16;
-                            initialLaunchDirection = Vector.mult(Vector.normalise(direction), launchMagnitude);
-                            launchDirection = initialLaunchDirection; // *** STORE the initial direction globally ***
+                            turnInProgress = true; pauseResumeGraceTicks = 0; // Reset grace ticks on new launch
+                            const initialLaunchDirection = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
+                            launchDirection = initialLaunchDirection; // *** STORE the initial direction for this turn ***
                             console.log(`Initial Launch. Turn Direction: {x: ${launchDirection.x.toFixed(2)}, y: ${launchDirection.y.toFixed(2)}}`);
 
                             const countToLaunch = Math.min(usedBalls.length, currentLaunchCount);
-                            if (countToLaunch === 0) { console.error("Launch Error: No balls!"); turnInProgress = false; return; }
+                            if (countToLaunch === 0) { console.error("Launch Error: No balls available!"); turnInProgress = false; return; }
                             console.log(`Launching ${countToLaunch} balls.`);
                             const ballsToLaunch = usedBalls.splice(0, countToLaunch);
+
+                            // Launch balls with stagger
                             ballsToLaunch.forEach((ball, index) => {
-                                balls.push(ball); ball.isSettled = false; ball.isUsed = false; ball.render.fillStyle = ACTIVE_BALL_COLOR;
-                                setTimeout(() => { // Keep stagger for initial launch visual
-                                    if (!gameOver) {
+                                balls.push(ball); ball.isSettled = false; ball.isUsed = false;
+                                // Clear any potential leftover pause state (shouldn't happen but safe)
+                                delete ball.pausedVelocity;
+                                delete ball.pausedAngularVelocity;
+                                ball.render.fillStyle = ACTIVE_BALL_COLOR; // Set standard active color
+
+                                setTimeout(() => { // Stagger launch timing
+                                    if (!gameOver && !isPausing) { // Check isPausing here too, unlikely but prevents weirdness
                                         Matter.Body.setPosition(ball, startPos); Matter.Body.setStatic(ball, false);
-                                        Matter.Body.setVelocity(ball, launchDirection); // Use the stored direction
+                                        // Use the stored launchDirection determined at the start of this launch sequence
+                                        Matter.Body.setVelocity(ball, launchDirection);
                                         Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
                                     }
-                                }, index * 80);
+                                }, index * 80); // 80ms stagger between balls
                             });
-                        } else { console.log("Initial launch cancelled - invalid angle."); }
-                    } else { console.log("Initial launch cancelled - drag/direction invalid."); }
+                        } else { console.log("Initial launch cancelled - invalid angle (too upward)."); turnInProgress = false; } // Ensure turn doesn't start if cancelled
+                    } else { console.log("Initial launch cancelled - drag distance/direction invalid."); turnInProgress = false; } // Ensure turn doesn't start if cancelled
                 }
             });
 
+            // Prevent context menu on right-click (handled in mousedown)
             render.canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); });
 
              // --- Rendering Logic (After Update) ---
-            Events.on(render, 'afterRender', function() { /* ... unchanged ... */
+            Events.on(render, 'afterRender', function() {
                 try {
                     const context = render.context;
-                    context.globalCompositeOperation = 'source-over';
+                    context.globalCompositeOperation = 'source-over'; // Ensure normal drawing mode
+
                     // Custom Polygon Text Rendering
                     polygons.forEach(poly => {
                         if (poly.render && poly.render.textValue && !poly.isDiamond) {
@@ -374,72 +487,121 @@
                             context.fillText(poly.render.textValue, poly.position.x, poly.position.y);
                         }
                     });
-                    // Cage Line
+
+                    // Cage Line Drawing
                     if (!gameOver) {
                         context.beginPath(); context.strokeStyle = '#CC0000'; context.lineWidth = CAGE_LINE_WIDTH; context.setLineDash([]);
                         const leftLineEndX = startPos.x - CAGE_GAP_WIDTH / 2; context.moveTo(0, CAGE_Y_POSITION); context.lineTo(leftLineEndX, CAGE_Y_POSITION);
                         const rightLineStartX = startPos.x + CAGE_GAP_WIDTH / 2; context.moveTo(rightLineStartX, CAGE_Y_POSITION); context.lineTo(CANVAS_WIDTH, CAGE_Y_POSITION); context.stroke();
                      }
-                    // Aiming Line
-                    if ((aiming || isReAiming) && !gameOver) {
+
+                    // Aiming Line Drawing (Visible during initial aim AND pause)
+                    if ((aiming || isPausing) && !gameOver) {
                         context.beginPath(); context.strokeStyle = '#000000'; context.lineWidth = 2; context.setLineDash([10, 5]);
                         const dx = mousePos.x - startPos.x; const dy = mousePos.y - startPos.y;
+                        // Only draw if aiming generally downwards and not straight up/corners
                         if (dy > -50) {
                             const angle = Math.atan2(dy, dx);
                             if (!(angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05)) {
-                                const length = Math.min(Math.sqrt(dx * dx + dy * dy), 200);
+                                const length = Math.min(Math.sqrt(dx * dx + dy * dy), 200); // Limit line length
                                 context.moveTo(startPos.x, startPos.y); context.lineTo(startPos.x + Math.cos(angle) * length, startPos.y + Math.sin(angle) * length); context.stroke();
                             }
                         }
-                        context.setLineDash([]);
+                        context.setLineDash([]); // Reset dash pattern
                      }
                 } catch (error) { console.error('Rendering error:', error); }
              });
 
             // --- Restart Game Function ---
-             function restartGame() { /* ... unchanged ... */
+             function restartGame() {
                  console.log("Executing restartGame...");
                 if (scoreFlashInterval) clearInterval(scoreFlashInterval); scoreFlashInterval = null;
+                // Clear world and engine
                 World.clear(world); Engine.clear(engine);
-                 engine.gravity.y = 1.0; engine.timing.timeScale = 1;
+                 // Reset engine properties
+                 engine.gravity.y = 1.0;
+                 engine.timing.timeScale = 1; // Ensure normal speed on restart
+                 isSpedUp = false; // Reset speed up state
+                // Reset game state variables
                 score = 0; balls = []; usedBalls = []; polygons = [];
-                gameOver = false; aiming = false; isReAiming = false; turnInProgress = false;
-                reAimGraceTicks = 0; // Reset grace on restart
+                gameOver = false; aiming = false; isPausing = false; turnInProgress = false;
+                pauseResumeGraceTicks = 0; // Reset grace on restart
                 currentLaunchCount = 1; nextRoundBallCount = 1; round = 1; rowCount = 0; launchDirection = null;
                 startPos = { x: FIXED_START_X, y: 20 };
-                document.getElementById('gameOver').style.display = 'none'; document.getElementById('scoreDisplay').style.display = 'none'; document.getElementById('scoreDisplay').style.visibility = 'visible';
+                lastRightClickTime = 0; // Reset double click timer
+                // Reset UI elements
+                document.getElementById('gameOver').style.display = 'none';
+                document.getElementById('scoreDisplay').style.display = 'none';
+                document.getElementById('scoreDisplay').style.visibility = 'visible';
+                // Restore original game over text in case it was changed
+                document.getElementById('gameOver').innerHTML = 'GAME OVER';
                 updateBanner();
-                World.add(world, [ // Re-add world bodies
+                // Re-add world boundaries
+                World.add(world, [
                      Bodies.rectangle(3, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.8, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
                      Bodies.rectangle(351, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.8, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
                      Bodies.rectangle(CANVAS_WIDTH / 2, CANVAS_HEIGHT + 30, CANVAS_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory } })
                 ]);
+                // Add initial ball(s) and polygon row
                 for (let i = 0; i < currentLaunchCount; i++) createBall(startPos.x, startPos.y, true);
                 createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT);
                 console.log("Game restarted. Ready balls:", usedBalls.length);
             }
+             // Add keyboard listener for restart (R key) - kept as alternative
              window.addEventListener('keydown', (e) => { if (!e.repeat && (e.key === 'r' || e.key === 'R')) restartGame(); });
 
             // --- End Turn Logic ---
-            function endTurn() { /* ... unchanged ... */
-                if (gameOver || isReAiming) return;
+            function endTurn() {
+                if (gameOver || isPausing) return; // Should not end turn while paused
                 console.log(`Executing endTurn for end of round ${round}.`);
-                reAimGraceTicks = 0; // Reset grace period for next turn
-                const newBallCount = nextRoundBallCount; console.log(`Next round balls = ${newBallCount}`);
-                World.remove(world, usedBalls);
-                if (balls.length > 0) { console.warn("Ending turn but active balls remain?"); World.remove(world, balls); }
-                usedBalls = []; balls = [];
-                const ballsToCreate = Math.min(newBallCount, MAX_OBJECTS - polygons.length);
-                startPos.x = FIXED_START_X;
-                for (let i = 0; i < ballsToCreate; i++) createBall(startPos.x, startPos.y, true);
-                if (ballsToCreate < newBallCount) console.warn(`Ball creation capped at ${ballsToCreate}.`);
-                polygons.forEach(poly => Matter.Body.translate(poly, { x: 0, y: -ROW_HEIGHT }));
-                for (const poly of polygons) {
-                    if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) { setTimeout(() => triggerGameOver(`Polygon reached cage line after move`), 50); return; }
+                pauseResumeGraceTicks = 0; // Reset grace period for next turn
+
+                // Reset speed to normal at the end of the turn
+                if (isSpedUp) {
+                    console.log("Resetting game speed to normal for next round.");
+                    isSpedUp = false;
+                    engine.timing.timeScale = 1;
                 }
-                if (!gameOver && polygons.length < MAX_OBJECTS * 0.8) createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT);
+
+                const newBallCount = nextRoundBallCount; console.log(`Next round balls = ${newBallCount}`);
+
+                // Clear existing balls from the world and arrays
+                // Clear paused state before removing, just in case
+                balls.forEach(b => { delete b.pausedVelocity; delete b.pausedAngularVelocity; });
+                usedBalls.forEach(b => { delete b.pausedVelocity; delete b.pausedAngularVelocity; });
+                World.remove(world, usedBalls);
+                if (balls.length > 0) {
+                    console.warn("Ending turn but active balls remain? Removing them.");
+                    World.remove(world, balls);
+                 }
+                usedBalls = []; balls = [];
+
+                // Create new balls for the next round, respecting MAX_OBJECTS limit
+                const ballsToCreate = Math.min(newBallCount, MAX_OBJECTS - polygons.length);
+                startPos.x = FIXED_START_X; // Reset start position X
+                for (let i = 0; i < ballsToCreate; i++) createBall(startPos.x, startPos.y, true); // Create as 'used' (ready)
+                if (ballsToCreate < newBallCount) console.warn(`Ball creation capped at ${ballsToCreate} due to object limit.`);
+
+                // Move existing polygons up
+                polygons.forEach(poly => Matter.Body.translate(poly, { x: 0, y: -ROW_HEIGHT }));
+
+                // Check for game over immediately after moving polygons
+                for (const poly of polygons) {
+                    if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) {
+                        // Use setTimeout to ensure render catches up before triggering game over visually
+                        setTimeout(() => triggerGameOver(`Polygon reached cage line after move`), 50);
+                        return; // Stop further end-turn logic if game over
+                    }
+                }
+
+                // Add a new row of polygons if not game over and space allows
+                if (!gameOver && polygons.length < MAX_OBJECTS * 0.8) {
+                    createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT);
+                }
+
+                // Update state for the new round
                 currentLaunchCount = ballsToCreate; nextRoundBallCount = ballsToCreate; round++;
-                turnInProgress = false; aiming = false; isReAiming = false; launchDirection = null; // Clear launch direction for next turn
+                turnInProgress = false; aiming = false; isPausing = false; launchDirection = null; // Clear initial launch direction
                 updateBanner();
                 console.log(`Starting round ${round}. Balls available: ${currentLaunchCount}. Ready balls: ${usedBalls.length}`);
             }
