@@ -52,7 +52,7 @@
             let aimLine = null, round = 1;
             let currentLaunchCount = 1, nextRoundBallCount = 1;
             let rowCount = 0;
-            let launchDirection = null; // Stores the initial launch direction for the turn
+            let launchDirection = null; // Stores the ACTIVE launch direction for the turn (updated on re-aim)
             const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96c93d', '#ffa502'];
             const DIAMOND_COLOR = '#000000', ACTIVE_BALL_COLOR = '#ff4500', USED_BALL_COLOR = '#808080';
             let fadeAlpha = 0, fadeDirection = 1, scoreFlashInterval = null;
@@ -171,6 +171,12 @@
 
                     if (poly.render) { poly.render.textValue = poly.value.toString(); } // Update custom text property
                     updateBanner();
+
+                    // Remove polygon immediately if value is zero
+                    if (poly.value <= 0) {
+                        World.remove(world, poly);
+                        polygons = polygons.filter(p => p !== poly);
+                    }
                 }
             }
 
@@ -258,14 +264,25 @@
                     // Polygon checks and updates
                     for (let i = polygons.length - 1; i >= 0; i--) {
                         const poly = polygons[i];
+                        if (!poly) continue; // Safety check
+
                         // Apply flicker effect
-                        if (poly.isDiamond) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
+                        if (poly.isDiamond && poly.render) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
+
                         // Check game over condition
                         if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) return triggerGameOver(`Polygon reached cage line`);
-                        // Remove destroyed polygons
-                        if (poly.value <= 0 && !poly.isDiamond) { World.remove(world, poly); polygons.splice(i, 1); }
+
+                        // Remove destroyed polygons (already handled in collision, but double-check)
+                        if (poly.value <= 0 && !poly.isDiamond) {
+                            if (World.get(world, poly.id, 'body')) { // Check if it still exists in world
+                                World.remove(world, poly);
+                            }
+                            polygons.splice(i, 1); // Remove from our tracking array
+                        }
                         // Update text value render property
-                        else if (!poly.isDiamond && poly.render) { poly.render.textValue = Math.floor(poly.value).toString(); }
+                        else if (!poly.isDiamond && poly.render) {
+                            poly.render.textValue = Math.floor(poly.value).toString();
+                        }
                     }
                     // Polygon Culling (if needed, though MAX_OBJECTS should handle it)
                     if (polygons.length > MAX_OBJECTS * 0.85) { const excess = polygons.length - Math.floor(MAX_OBJECTS * 0.85); const removedPolys = polygons.splice(0, excess); World.remove(world, removedPolys); }
@@ -281,7 +298,6 @@
                             if (ball.render.fillStyle !== ACTIVE_BALL_COLOR) {
                                 ball.render.fillStyle = ACTIVE_BALL_COLOR;
                             }
-
 
                             // --- Anti-Stuck Logic (with Grace Period Check) ---
                             if (pauseResumeGraceTicks <= 0 && ball.speed < STUCK_SPEED_THRESHOLD && ball.position.y < STUCK_ESCAPE_ZONE_Y) {
@@ -330,7 +346,6 @@
                                     Matter.Body.setStatic(ball, true);
                                 }
                             });
-                            // No need to remove aimLine here, it's useful during pause
                         }
                     } else if (!aiming && !turnInProgress && usedBalls.length > 0) { // Start Initial Aim
                         aiming = true; isPausing = false;
@@ -376,13 +391,13 @@
 
                 if (isPausing) { // --- Resume from Pause with RE-AIM ---
                     isPausing = false; // Pause finished
-                    console.log("Resuming turn with re-aim.");
+                    console.log("Resuming turn with re-aim attempt.");
 
                     // Calculate the NEW launch direction based on mouse release ONCE
                     const direction = Vector.sub(endPos, startPos);
                     const magnitudeSquared = Vector.magnitudeSquared(direction);
-                    let newLaunchVelocity = null; // Assume invalid initially
-                    let reAimIsValid = false; // Flag for validity
+                    let newLaunchVelocity = null;
+                    let reAimIsValid = false;
 
                     // Validate the re-aim direction (similar to initial launch)
                     if (direction.y > -50 && magnitudeSquared > 20 * 20) { // Check minimum drag and downward direction
@@ -391,7 +406,10 @@
                             // Re-aim is valid, calculate the velocity vector
                             newLaunchVelocity = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
                             reAimIsValid = true;
-                            console.log(`Re-aim Direction Valid: {x: ${newLaunchVelocity.x.toFixed(2)}, y: ${newLaunchVelocity.y.toFixed(2)}}`);
+                            console.log(`Re-aim Direction Valid. New Velocity: {x: ${newLaunchVelocity.x.toFixed(2)}, y: ${newLaunchVelocity.y.toFixed(2)}}`);
+                            // **** CORE FIX: Update the turn's active launchDirection ****
+                            launchDirection = Vector.clone(newLaunchVelocity); // Store the *new* direction globally for the turn
+                            // ***********************************************************
                         } else {
                             console.log("Re-aim cancelled - invalid angle (too upward). Restoring original velocity.");
                         }
@@ -408,7 +426,7 @@
 
                              if (reAimIsValid && newLaunchVelocity) { // Check the flag and that velocity exists
                                  // Apply the NEW velocity from re-aim
-                                 Matter.Body.setVelocity(ball, newLaunchVelocity); // Use the calculated velocity
+                                 Matter.Body.setVelocity(ball, newLaunchVelocity); // Use the newly calculated velocity
                                  Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05); // Give a little spin
                              } else {
                                  // Apply the ORIGINAL stored velocity if re-aim was invalid
@@ -439,8 +457,9 @@
                         if (!(angle > -Math.PI * 0.95 && angle < -Math.PI * 0.05)) {
                             turnInProgress = true; pauseResumeGraceTicks = 0; // Reset grace ticks on new launch
                             const initialLaunchDirection = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
-                            launchDirection = initialLaunchDirection; // *** STORE the initial direction for this turn ***
-                            console.log(`Initial Launch. Turn Direction: {x: ${launchDirection.x.toFixed(2)}, y: ${launchDirection.y.toFixed(2)}}`);
+                            // *** STORE the initial direction for this turn ***
+                            launchDirection = initialLaunchDirection;
+                            console.log(`Initial Launch. Turn Direction Set: {x: ${launchDirection.x.toFixed(2)}, y: ${launchDirection.y.toFixed(2)}}`);
 
                             const countToLaunch = Math.min(usedBalls.length, currentLaunchCount);
                             if (countToLaunch === 0) { console.error("Launch Error: No balls available!"); turnInProgress = false; return; }
@@ -459,7 +478,7 @@
                                     if (!gameOver && !isPausing) { // Check isPausing here too, unlikely but prevents weirdness
                                         Matter.Body.setPosition(ball, startPos); Matter.Body.setStatic(ball, false);
                                         // Use the stored launchDirection determined at the start of this launch sequence
-                                        Matter.Body.setVelocity(ball, launchDirection);
+                                        Matter.Body.setVelocity(ball, launchDirection); // Use the consistent direction stored for the turn
                                         Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
                                     }
                                 }, index * 80); // 80ms stagger between balls
@@ -601,7 +620,7 @@
 
                 // Update state for the new round
                 currentLaunchCount = ballsToCreate; nextRoundBallCount = ballsToCreate; round++;
-                turnInProgress = false; aiming = false; isPausing = false; launchDirection = null; // Clear initial launch direction
+                turnInProgress = false; aiming = false; isPausing = false; launchDirection = null; // Clear active launch direction for the new turn
                 updateBanner();
                 console.log(`Starting round ${round}. Balls available: ${currentLaunchCount}. Ready balls: ${usedBalls.length}`);
             }
