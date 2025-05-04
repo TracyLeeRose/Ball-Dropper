@@ -12,7 +12,8 @@ A simple web-based physics game where you aim and shoot balls to destroy numbere
 *   **Turn-Based Progression:** Polygons move up one row after all balls have settled each turn.
 *   **Game Over Condition:** The game ends if any polygon reaches the dotted "cage line" near the top.
 *   **Scoring:** Score increases with each hit on a numbered polygon.
-*   **Speed-Up Toggle:** Double-click while balls are active to speed up the simulation (4x speed).
+*   **Speed-Up Toggle:** Double-click RIGHT MOUSE button while balls are active to speed up the simulation (4x speed).
+*   **Speed Jolt: ** Double clicking the LEFT MOUSE button will jolt the balls 
 *   **Simple Controls:** Easy mouse-based aiming and shooting, plus right-click restart.
 *   **Browser-Based:** Runs entirely in the web browser, no installation needed beyond a modern browser.
 
@@ -28,7 +29,7 @@ A simple web-based physics game where you aim and shoot balls to destroy numbere
     *   A new row of polygons appears at the bottom.
     *   The numbers on the new polygons generally increase as the rounds go up.
 7.  **Game Over:** If any polygon touches or crosses the dotted "cage line" near the top of the screen, the game is over.
-8.  **Speed Up:** While balls are bouncing around, you can **double-click** anywhere in the game area to toggle between normal speed and 4x speed.
+8.  **Speed Up:** While balls are bouncing around, you can **RIGHT-MOUSE double-click** anywhere in the game area to toggle between normal speed and 4x speed.
 9.  **Restart:** **Right-click** anywhere in the game area at any time to immediately restart the game from the beginning.
 
 ## How to Run
