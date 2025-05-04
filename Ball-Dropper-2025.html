@@ -24,10 +24,17 @@
         try {
             const Engine = Matter.Engine, Render = Matter.Render, World = Matter.World, Bodies = Matter.Bodies, Events = Matter.Events, Vector = Matter.Vector;
 
-            const engine = Engine.create({ timing: { timeScale: 1 }, positionIterations: 10, velocityIterations: 10 });
+            // --- Engine Setup ---
+            // Increased position/velocity iterations slightly for potentially better stability with higher restitution
+            const engine = Engine.create({
+                timing: { timeScale: 1 },
+                positionIterations: 12, // Increased from 10
+                velocityIterations: 12  // Increased from 10
+            });
             const world = engine.world;
             engine.gravity.y = 1.0;
 
+            // --- Constants ---
             const CANVAS_WIDTH = 356, CANVAS_HEIGHT = 720, ROW_HEIGHT = 80, MAX_OBJECTS = 120, POLYGON_SPACING = 32;
             const POLYGON_RADIUS = 20;
             const CAGE_Y_POSITION = 45;
@@ -35,6 +42,7 @@
             const CAGE_LINE_WIDTH = 2;
             const FIXED_START_X = CANVAS_WIDTH / 2;
             const LAUNCH_MAGNITUDE = 16; // Consistent launch speed
+            const BALL_RADIUS = 7.5;
 
             const render = Render.create({
                 element: document.getElementById('gameContainer'),
@@ -43,13 +51,15 @@
             });
             if (!render.canvas) throw new Error("Canvas failed to create");
 
+            // --- Collision Categories ---
             const defaultCategory = 0x0001, ballCategory = 0x0002;
 
+            // --- Game State Variables ---
             let score = 0, balls = [], usedBalls = [], polygons = [];
             let gameOver = false, aiming = false, turnInProgress = false;
             let isPausing = false; // Used when pausing mid-turn
             let startPos = { x: FIXED_START_X, y: 20 };
-            let aimLine = null, round = 1;
+            let round = 1;
             let currentLaunchCount = 1, nextRoundBallCount = 1;
             let rowCount = 0;
             let launchDirection = null; // Stores the ACTIVE launch direction for the turn (updated on re-aim)
@@ -77,17 +87,22 @@
 
             // --- World Setup ---
             World.add(world, [
-                Bodies.rectangle(3, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.8, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
-                Bodies.rectangle(351, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.8, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                // Walls with increased restitution
+                Bodies.rectangle(3, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                Bodies.rectangle(351, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
                 Bodies.rectangle(CANVAS_WIDTH / 2, CANVAS_HEIGHT + 30, CANVAS_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory } })
             ]);
 
             // --- Ball Creation ---
             function createBall(x = FIXED_START_X, y = 20, isUsed = false) {
                 if (balls.length + usedBalls.length >= MAX_OBJECTS) return null;
-                const ball = Bodies.circle(x, y, 7.5, {
-                    restitution: 0.85, friction: 0.001, frictionStatic: 0.01, frictionAir: 0.005,
-                    slop: 0.05, density: 0.3,
+                const ball = Bodies.circle(x, y, BALL_RADIUS, {
+                    // *** Increased restitution for more bounce ***
+                    restitution: 0.95,
+                    friction: 0.001, frictionStatic: 0.01, frictionAir: 0.005,
+                    slop: 0.05,
+                    // Density adjusted slightly - lower density can sometimes feel 'bouncier'
+                    density: 0.25,
                     collisionFilter: { category: ballCategory, mask: defaultCategory },
                     render: { fillStyle: isUsed ? USED_BALL_COLOR : ACTIVE_BALL_COLOR }
                 });
@@ -110,13 +125,15 @@
                     const x = 29 + offset + (i * POLYGON_SPACING);
                     if (x + POLYGON_RADIUS > CANVAS_WIDTH - 12 || polygons.length + newPolygons.length >= MAX_OBJECTS) break;
                     let isDiamond = Math.random() < 0.2 && diamondCount < 2; if (isDiamond) diamondCount++;
-                    const shapeType = isDiamond ? 4 : Math.floor(Math.random() * 5);
-                    const sides = shapeType === 0 ? 32 : shapeType + 2;
+                    const shapeType = isDiamond ? 4 : Math.floor(Math.random() * 5); // 4 for diamond, 0-4 for others
+                    const sides = shapeType === 0 ? 32 : shapeType + 2; // 0 -> circle, 1 -> triangle, etc.
                     const value = isDiamond ? 0 : Math.max(1, (Math.floor(Math.random() * 3) + 1) + (rowCount * 3));
                     const color = isDiamond ? DIAMOND_COLOR : colors[Math.floor(Math.random() * colors.length)];
                     const poly = Bodies.polygon(x, yPos, sides, POLYGON_RADIUS, {
                         isStatic: true, value: value, originalValue: value, isDiamond: isDiamond,
-                        restitution: 0.8, friction: 0.01, frictionStatic: 0.05, slop: 0.02, density: 1.0,
+                        // *** Increased restitution for polygons ***
+                        restitution: 0.9,
+                        friction: 0.01, frictionStatic: 0.05, slop: 0.02, density: 1.0,
                         collisionFilter: { category: defaultCategory, mask: ballCategory | defaultCategory },
                         render: {
                             fillStyle: color,
@@ -223,7 +240,6 @@
                 document.getElementById('gameOver').style.display = 'block';
                 document.getElementById('scoreDisplay').textContent = `Score: ${score}`;
                 document.getElementById('scoreDisplay').style.display = 'block';
-                if (aimLine) { World.remove(world, aimLine); aimLine = null; }
                 if (scoreFlashInterval) clearInterval(scoreFlashInterval);
                 let flashVisible = true;
                 scoreFlashInterval = setInterval(() => {
@@ -307,9 +323,16 @@
                                 // console.log(`Kicking stuck ball ${ball.id}`);
                             }
 
-                            // Wall boundary checks (simple position correction and velocity dampening)
-                            if (ball.position.x < 7.5) { Matter.Body.setPosition(ball, { x: 7.5, y: ball.position.y }); Matter.Body.setVelocity(ball, { x: Math.abs(ball.velocity.x) * 0.6, y: ball.velocity.y }); }
-                            else if (ball.position.x > CANVAS_WIDTH - 7.5) { Matter.Body.setPosition(ball, { x: CANVAS_WIDTH - 7.5, y: ball.position.y }); Matter.Body.setVelocity(ball, { x: -Math.abs(ball.velocity.x) * 0.6, y: ball.velocity.y }); }
+                            // Wall boundary checks (simple position correction and velocity adjustment based on increased wall restitution)
+                            const wallRestitution = 0.9; // Match wall restitution
+                            if (ball.position.x < BALL_RADIUS + 2) { // Check against wall + ball radius
+                                Matter.Body.setPosition(ball, { x: BALL_RADIUS + 2, y: ball.position.y });
+                                Matter.Body.setVelocity(ball, { x: Math.abs(ball.velocity.x) * wallRestitution, y: ball.velocity.y });
+                            }
+                            else if (ball.position.x > CANVAS_WIDTH - BALL_RADIUS - 2) {
+                                Matter.Body.setPosition(ball, { x: CANVAS_WIDTH - BALL_RADIUS - 2, y: ball.position.y });
+                                Matter.Body.setVelocity(ball, { x: -Math.abs(ball.velocity.x) * wallRestitution, y: ball.velocity.y });
+                             }
                             // Safety net for balls falling through floor
                             if (ball.position.y > CANVAS_HEIGHT + 50) { console.warn(`Ball ${ball.id} fell through! Forcing settlement.`); settleBall(ball); }
                         }
@@ -540,6 +563,9 @@
                  // Reset engine properties
                  engine.gravity.y = 1.0;
                  engine.timing.timeScale = 1; // Ensure normal speed on restart
+                 // Restore original engine iterations if needed, though keeping them higher might be fine
+                 engine.positionIterations = 12;
+                 engine.velocityIterations = 12;
                  isSpedUp = false; // Reset speed up state
                 // Reset game state variables
                 score = 0; balls = []; usedBalls = []; polygons = [];
@@ -557,8 +583,8 @@
                 updateBanner();
                 // Re-add world boundaries
                 World.add(world, [
-                     Bodies.rectangle(3, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.8, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
-                     Bodies.rectangle(351, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.8, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                     Bodies.rectangle(3, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
+                     Bodies.rectangle(351, CANVAS_HEIGHT / 2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory } }),
                      Bodies.rectangle(CANVAS_WIDTH / 2, CANVAS_HEIGHT + 30, CANVAS_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory } })
                 ]);
                 // Add initial ball(s) and polygon row
