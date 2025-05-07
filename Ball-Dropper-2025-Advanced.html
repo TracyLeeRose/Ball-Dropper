@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Polygon Ball Dropper</title>
+    <style>
+        body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #e0e0e0; }
+        #gameContainer {
+            position: relative;
+            /* Increased width for pathways (25px left + 356px play area + 25px right) */
+            width: 406px;
+            height: 760px; /* Increased height to keep proportions reasonable */
+            overflow: hidden;
+            background: #a0a0a0; /* Background for the pathways area */
+            border: 1px solid #555;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        canvas {
+            /* Canvas covers the whole container, physics is constrained */
+            position: absolute;
+            top: 60px; /* Position below banners */
+            left: 0;
+            cursor: crosshair;
+            z-index: 5; /* Below banners but above pathway/play area backgrounds */
+        }
+        #playAreaBackground {
+             position: absolute;
+             top: 60px; /* Align with canvas top */
+             left: 25px; /* Pathway width */
+             width: 356px; /* Original play area width */
+             height: 700px; /* Canvas height */
+             background: #f0f0f0; /* Distinct background for play area */
+             z-index: 1; /* Behind canvas elements, above container background */
+             border-left: 1px dashed #888; /* Visual separator */
+             border-right: 1px dashed #888; /* Visual separator */
+         }
+        #marqueeBanner { position: absolute; top: 0; left: 0; width: 100%; height: 30px; background: #0066cc; color: white; font-family: Arial, sans-serif; font-size: 20px; text-align: center; line-height: 30px; z-index: 11; }
+        #banner { position: absolute; top: 30px; left: 0; width: 100%; height: 30px; background: #333; color: white; font-family: Arial, sans-serif; font-size: 20px; text-align: center; line-height: 30px; z-index: 10; }
+        #gameOver { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Arial Black', Gadget, sans-serif; font-size: 50px; font-weight: bold; color: #CC0000; display: none; text-align: center; text-shadow: 3px 3px 5px rgba(0, 0, 0, 0.6); z-index: 100; width: 90%; }
+        #scoreDisplay { position: absolute; top: 65%; left: 50%; transform: translate(-50%, -50%); font-family: Arial, sans-serif; font-size: 26px; font-weight: bold; color: #CC0000; display: none; text-align: center; text-shadow: 2px 2px 3px rgba(0, 0, 0, 0.5); z-index: 100; }
+
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="marqueeBanner">Tracy's Ball Droppers</div>
+        <div id="banner">Score: 0 | Balls: 1 | Round: 1</div>
+        <div id="playAreaBackground"></div> {/* Div for play area background */}
+        <canvas id="gameCanvas"></canvas> {/* Added ID for clarity */}
+        <div id="gameOver">GAME OVER</div>
+        <div id="scoreDisplay">Score: 0</div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script>
+        try {
+            const Engine = Matter.Engine, Render = Matter.Render, World = Matter.World, Bodies = Matter.Bodies, Events = Matter.Events, Vector = Matter.Vector;
+
+            // --- Engine Setup ---
+            const engine = Engine.create({
+                timing: { timeScale: 1 },
+                positionIterations: 12,
+                velocityIterations: 12
+            });
+            const world = engine.world;
+            engine.gravity.y = 1.0;
+
+            // --- Constants ---
+            const CONTAINER_WIDTH = 406;
+            const PATHWAY_WIDTH = 25;
+            const PLAY_AREA_WIDTH = 356; // CONTAINER_WIDTH - 2 * PATHWAY_WIDTH
+            const PLAY_AREA_LEFT = PATHWAY_WIDTH;
+            const PLAY_AREA_RIGHT = PLAY_AREA_LEFT + PLAY_AREA_WIDTH;
+            const CANVAS_WIDTH = CONTAINER_WIDTH; // Canvas spans the whole container
+            const CANVAS_HEIGHT = 700;
+            const TOP_UI_HEIGHT = 60;
+            const ROW_HEIGHT = 80, MAX_OBJECTS = 120, POLYGON_SPACING = 32;
+            const POLYGON_RADIUS = 20;
+            const HOPPER_Y = 20; // Y position for balls waiting at the top
+            const HOPPER_TARGET_Y_OFFSET = 5; // Randomness in final Y position
+            const HOPPER_TARGET_X_OFFSET = 15; // Randomness in final X position
+            const HOPPER_CENTER_X = CONTAINER_WIDTH / 2; // Center of the play area/hopper
+            const BALL_RADIUS = 7.5;
+            const LAUNCH_POINT_Y = HOPPER_Y + BALL_RADIUS + 10; // Y position where aiming starts
+            const LAUNCH_MAGNITUDE = 16;
+            const CAGE_Y_POSITION = LAUNCH_POINT_Y + 20; // Game over line for polygons
+            const CAGE_GAP_WIDTH = 36;
+            const CAGE_LINE_WIDTH = 2;
+            const FIXED_START_X = HOPPER_CENTER_X; // Aiming starts from center X
+            // Return Pathway Constants
+            const RETURN_BALL_SPEED_VERTICAL = 3.8; // Speed moving up the tube
+            const RETURN_BALL_SPEED_HORIZONTAL = 3.5; // Speed moving sideways at the top
+            const HORIZONTAL_TRANSITION_Y = HOPPER_Y + BALL_RADIUS + 5; // Y level to start moving horizontally
+            const PATHWAY_COLOR = '#a0a0a0'; // Background color of the side tubes
+            const PLAY_AREA_BG_COLOR = '#f0f0f0'; // Background of the main play area
+
+            const render = Render.create({
+                element: document.getElementById('gameContainer'),
+                engine: engine,
+                canvas: document.getElementById('gameCanvas'), // Use the specific canvas
+                options: {
+                    width: CANVAS_WIDTH,
+                    height: CANVAS_HEIGHT,
+                    wireframes: false,
+                    background: 'transparent' // Canvas is transparent to show pathway/play area backgrounds
+                }
+            });
+            if (!render.canvas) throw new Error("Canvas failed to create");
+            render.canvas.style.top = `${TOP_UI_HEIGHT}px`;
+
+            // --- Collision Categories ---
+            const defaultCategory = 0x0001, ballCategory = 0x0002;
+
+            // --- Game State Variables ---
+            let score = 0;
+            let activeBalls = []; // Matter.js bodies currently in play
+            let returningBalls = []; // Objects representing balls in the return animation { body, x, y, targetX, targetY, pathway, radius, color, isMovingHorizontally }
+            let hopperBalls = []; // Matter.js bodies static in the hopper area
+            let polygons = [];
+            let nextReturnPathway = 'left'; // Alternates 'left' and 'right'
+            let gameOver = false, aiming = false, turnInProgress = false;
+            let isPausing = false;
+            let startPos = { x: FIXED_START_X, y: LAUNCH_POINT_Y };
+            let round = 1;
+            let currentLaunchCount = 0; // How many balls were actually launched this turn
+            let nextRoundBallCount = 1; // Target number of balls for the *next* round
+            let rowCount = 0;
+            let launchDirection = null;
+            const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96c93d', '#ffa502'];
+            const DIAMOND_COLOR = '#000000', ACTIVE_BALL_COLOR = '#ff4500', USED_BALL_COLOR = '#808080';
+            let fadeAlpha = 0, fadeDirection = 1, scoreFlashInterval = null;
+            const STUCK_SPEED_THRESHOLD = 0.15;
+            const STUCK_ESCAPE_ZONE_Y = CANVAS_HEIGHT - 40;
+            const STUCK_KICK_VY_MIN = -0.8;
+            const STUCK_KICK_VY_RAND = 1.0;
+            const STUCK_KICK_VX_AMP = 0.5;
+            let pauseResumeGraceTicks = 0;
+            const PAUSE_RESUME_GRACE_TICKS_TOTAL = 5;
+            let isSpedUp = false;
+            let lastRightClickTime = 0;
+            const DOUBLE_CLICK_THRESHOLD = 500;
+
+            function updateBanner() {
+                 document.getElementById('banner').textContent = `Score: ${score} | Balls: ${nextRoundBallCount} | Round: ${round}`;
+            }
+
+             function interpolateHexColor(color1, color2, factor) {
+                factor = Math.max(0, Math.min(1, factor));
+                const c1 = parseInt(color1.substring(1), 16);
+                const r1 = (c1 >> 16) & 255, g1 = (c1 >> 8) & 255, b1 = c1 & 255;
+                const c2 = parseInt(color2.substring(1), 16);
+                const r2 = (c2 >> 16) & 255, g2 = (c2 >> 8) & 255, b2 = c2 & 255;
+                const r = Math.round(r1 + (r2 - r1) * factor);
+                const g = Math.round(g1 + (g2 - g1) * factor);
+                const b = Math.round(b1 + (b2 - b1) * factor);
+                return `#${(1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1).padStart(6, '0')}`;
+            }
+
+            // --- World Setup ---
+            World.add(world, [
+                // Play area walls (visual boundaries are handled by CSS/background div)
+                Bodies.rectangle(PLAY_AREA_LEFT + 2, CANVAS_HEIGHT / 2 + TOP_UI_HEIGHT/2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { visible: false } }), // Left wall
+                Bodies.rectangle(PLAY_AREA_RIGHT - 2, CANVAS_HEIGHT / 2 + TOP_UI_HEIGHT/2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { visible: false } }), // Right wall
+                // Bottom sensor to catch balls
+                Bodies.rectangle(HOPPER_CENTER_X, CANVAS_HEIGHT + 30, PLAY_AREA_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { visible: false } })
+            ]);
+
+            // --- Ball Creation ---
+            function createBallBody(x, y, isHopperBall = false) {
+                 const ball = Bodies.circle(x, y, BALL_RADIUS, {
+                     restitution: 0.95, friction: 0.001, frictionStatic: 0.01, frictionAir: 0.005,
+                     slop: 0.05, density: 0.25,
+                     collisionFilter: { category: ballCategory, mask: defaultCategory },
+                     render: { fillStyle: isHopperBall ? USED_BALL_COLOR : ACTIVE_BALL_COLOR, strokeStyle: '#555', lineWidth: 0.5 }
+                 });
+                 // Add custom properties needed for game logic
+                 ball.isReturning = false; // Is it currently in the return tube animation?
+                 ball.isHopper = isHopperBall; // Is it static in the top hopper?
+                 ball.isMovingHorizontally = false; // Used only for returning balls state
+                 ball.pausedVelocity = null;
+                 ball.pausedAngularVelocity = null;
+                 return ball;
+            }
+
+            // --- Polygon Creation ---
+             function createPolygonRow(yPos) {
+                const newPolygons = [];
+                const offset = (rowCount % 2 === 1) ? POLYGON_SPACING / 2 : 0;
+                // Calculate max polygons based on play area width
+                const maxPolys = Math.floor((PLAY_AREA_WIDTH - 40) / POLYGON_SPACING) + 1;
+                let diamondCount = 0;
+                const currentObjectCount = hopperBalls.length + activeBalls.length + returningBalls.length + polygons.length; // Count objects across all tracked states
+
+                for (let i = 0; i < maxPolys; i++) {
+                    // Calculate X position relative to the play area start
+                    const x = PLAY_AREA_LEFT + 20 + offset + (i * POLYGON_SPACING);
+                    // Ensure polygon stays within play area and respects MAX_OBJECTS
+                    if (x + POLYGON_RADIUS > PLAY_AREA_RIGHT - 10 || currentObjectCount + newPolygons.length >= MAX_OBJECTS) break;
+
+                    let isDiamond = Math.random() < 0.2 && diamondCount < 2; if (isDiamond) diamondCount++;
+                    const shapeType = isDiamond ? 4 : Math.floor(Math.random() * 5); // 4 sides = diamond, 0 = circle(32), 1=triangle, 2=square...
+                    const sides = shapeType === 0 ? 32 : shapeType + 2;
+                    const value = isDiamond ? 0 : Math.max(1, (Math.floor(Math.random() * 3) + 1) + (rowCount * 3)); // Value increases with rows
+                    const color = isDiamond ? DIAMOND_COLOR : colors[Math.floor(Math.random() * colors.length)];
+
+                    const poly = Bodies.polygon(x, yPos, sides, POLYGON_RADIUS, {
+                        isStatic: true, value: value, originalValue: value, isDiamond: isDiamond,
+                        restitution: 0.9, friction: 0.01, frictionStatic: 0.05, slop: 0.02, density: 1.0,
+                        collisionFilter: { category: defaultCategory, mask: ballCategory | defaultCategory }, // Collides with balls and walls
+                        render: { fillStyle: color, strokeStyle: isDiamond ? `rgba(255, 0, 0, ${fadeAlpha})` : '#444', lineWidth: isDiamond ? 2 : 1, textValue: value.toString(), textSize: 12, textColor: '#ffffff', textFont: 'Arial' }
+                    });
+                    newPolygons.push(poly);
+                }
+                polygons.push(...newPolygons);
+                World.add(world, newPolygons);
+                rowCount++;
+             }
+
+            // --- Initial Game Setup ---
+            function setupInitialBalls(count) {
+                // Clear existing hopper balls if any
+                if (hopperBalls.length > 0) { World.remove(world, hopperBalls); hopperBalls = []; }
+                for (let i = 0; i < count; i++) {
+                     const ball = createBallBody(
+                         // Place balls randomly near the hopper center
+                         HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET * 2,
+                         HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET,
+                         true // Mark as hopper ball
+                     );
+                     Matter.Body.setStatic(ball, true); // Hopper balls are static until launched
+                     World.add(world, ball);
+                     hopperBalls.push(ball);
+                }
+                nextRoundBallCount = count; // Set the target for the NEXT round
+                currentLaunchCount = 0; // Reset launch count for this turn
+            }
+
+            setupInitialBalls(1);
+            createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT); // Add first row at the bottom
+            updateBanner();
+
+            // --- Collision Handling ---
+            Events.on(engine, 'collisionStart', function(event) {
+                if (gameOver || isPausing) return;
+                const pairs = event.pairs;
+                pairs.forEach(pair => {
+                    let ball = null, other = null;
+                    // Identify if collision involves an active ball
+                    if (activeBalls.includes(pair.bodyA)) { ball = pair.bodyA; other = pair.bodyB; }
+                    else if (activeBalls.includes(pair.bodyB)) { ball = pair.bodyB; other = pair.bodyA; }
+
+                    if (ball && !ball.isReturning && !ball.isHopper) { // Ensure it's an active ball, not returning or in hopper
+                        if (polygons.includes(other)) {
+                            handlePolygonHit(ball, other);
+                        } else if (other.isSensor && other.label === 'bottomSensor') {
+                             // Ball hit the bottom sensor - initiate return sequence
+                             // Use setTimeout to avoid modifying arrays during collision iteration
+                             setTimeout(() => {
+                                 const ballIndex = activeBalls.findIndex(b => b.id === ball.id);
+                                 // Double check conditions haven't changed (game over, pause, already returning)
+                                 if (!isPausing && !gameOver && ballIndex !== -1 && !ball.isReturning) {
+                                    ball.isReturning = true; // Mark the ball as returning
+                                    ball.isMovingHorizontally = false; // Start in vertical ascent mode
+                                    const exitingBall = activeBalls.splice(ballIndex, 1)[0]; // Remove from active list
+
+                                    // IMPORTANT: Remove the Matter.js body from the physics world
+                                    World.remove(world, exitingBall);
+
+                                    // Determine pathway and starting/target positions for animation
+                                    const pathway = nextReturnPathway;
+                                    const entryX = (pathway === 'left') ? PATHWAY_WIDTH / 2 : PLAY_AREA_RIGHT + PATHWAY_WIDTH / 2; // Center of the pathway tube
+                                    const targetY = HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET; // Random target in hopper
+                                    const targetX = HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET; // Random target in hopper
+
+                                    // Add ball info to the returningBalls array for manual animation
+                                    returningBalls.push({
+                                        body: exitingBall, // Keep reference to original body
+                                        x: entryX, // Start at bottom of pathway X
+                                        y: CANVAS_HEIGHT - BALL_RADIUS, // Start at bottom Y
+                                        targetX: targetX,
+                                        targetY: targetY,
+                                        pathway: pathway,
+                                        radius: BALL_RADIUS,
+                                        color: ACTIVE_BALL_COLOR, // Start with active color
+                                        isMovingHorizontally: false // Initial state
+                                    });
+
+                                    // Switch pathway for the next ball
+                                    nextReturnPathway = (pathway === 'left') ? 'right' : 'left';
+
+                                    // Check if this was the last ball, potentially ending the turn
+                                    checkEndTurnCondition();
+                                }
+                             }, 20); // Small delay
+                        }
+                    }
+                });
+            });
+
+             function handlePolygonHit(ball, poly) {
+                  if (poly.isDiamond) {
+                     // Hit a diamond: Increase target ball count for the *next* round
+                     nextRoundBallCount++;
+                     console.log(`Diamond hit! nextRoundBallCount increased to: ${nextRoundBallCount}`);
+
+                     // ** IMPORTANT: Diamonds NO LONGER add balls directly to hopper. **
+                     // The increased `nextRoundBallCount` ensures more balls are available *after* the next round setup.
+
+                     updateBanner(); // Update banner with new target count
+                     // Remove the diamond immediately
+                     World.remove(world, poly);
+                     polygons = polygons.filter(p => p !== poly);
+                 } else {
+                     // Handle regular polygon hit
+                     score++;
+                     const damage = 1; // Simple damage model
+                     poly.value = Math.max(0, Math.floor(poly.value - damage));
+                     if (poly.render) { poly.render.textValue = poly.value.toString(); } // Update visual text
+                     updateBanner();
+                     if (poly.value <= 0) {
+                         // Polygon destroyed
+                         World.remove(world, poly);
+                         polygons = polygons.filter(p => p !== poly);
+                     }
+                 }
+             }
+
+             // --- Check End Turn Condition ---
+             function checkEndTurnCondition() {
+                 // Turn ends ONLY when the turn was active AND no balls are currently active (in play) OR returning (in tubes)
+                 if (!gameOver && !isPausing && turnInProgress && activeBalls.length === 0 && returningBalls.length === 0) {
+                     console.log("CheckEndTurn: Active=0, Returning=0. Conditions met. Ending turn soon.");
+
+                     turnInProgress = false; // Tentatively mark turn as ended
+                     aiming = false;
+                     isPausing = false; // Ensure not paused
+
+                     // Use a short delay to prevent race conditions or immediate state changes
+                     setTimeout(() => {
+                         // Final check after delay to ensure conditions still hold
+                         if (!gameOver && !isPausing && activeBalls.length === 0 && returningBalls.length === 0) {
+                              endTurn(); // Proceed to end the turn
+                         } else {
+                             console.log("CheckEndTurn Delay: Conditions changed (active/returning balls appeared), not ending turn.");
+                             // If balls reappeared, mark turn as in progress again
+                             if(activeBalls.length > 0 || returningBalls.length > 0) turnInProgress = true;
+                         }
+                     }, 400); // Delay allows final balls to enter return tubes etc.
+                 }
+             }
+
+            // --- Game Over Logic ---
+            function triggerGameOver(reason = "Game Over") {
+                if (gameOver) return; // Prevent multiple triggers
+                gameOver = true;
+                aiming = false; isPausing = false; turnInProgress = false; // Stop all actions
+                pauseResumeGraceTicks = 0;
+                isSpedUp = false; engine.timing.timeScale = 1; // Reset speed
+                console.log("Game over triggered:", reason, "- Final Score:", score);
+
+                // Display Game Over UI
+                document.getElementById('gameOver').style.display = 'block';
+                document.getElementById('scoreDisplay').textContent = `Score: ${score}`;
+                document.getElementById('scoreDisplay').style.display = 'block';
+
+                // Stop score flashing if it was running
+                if (scoreFlashInterval) clearInterval(scoreFlashInterval);
+                let flashVisible = true;
+                scoreFlashInterval = setInterval(() => {
+                    // Ensure cleanup if restart happens during flash
+                    if (!gameOver) { clearInterval(scoreFlashInterval); document.getElementById('scoreDisplay').style.visibility = 'visible'; return; }
+                    flashVisible = !flashVisible;
+                    document.getElementById('scoreDisplay').style.visibility = flashVisible ? 'visible' : 'hidden';
+                }, 600); // Flash interval
+
+                // Update Game Over text with restart instruction
+                document.getElementById('gameOver').innerHTML = 'GAME OVER<br><span style="font-size: 20px;">Right-click or press R to restart</span>';
+             }
+
+            // --- Main Game Loop (Before Update) ---
+            Events.on(engine, 'beforeUpdate', function() {
+                if (gameOver) return; // Skip updates if game over
+                if (pauseResumeGraceTicks > 0) pauseResumeGraceTicks--;
+
+                // --- Pause Logic ---
+                if (isPausing) {
+                     // Animate diamond glow during pause
+                     fadeAlpha = fadeAlpha + fadeDirection * 0.02; if (fadeAlpha <= 0 || fadeAlpha >= 1) fadeDirection *= -1; fadeAlpha = Math.max(0, Math.min(1, fadeAlpha));
+                     polygons.forEach(poly => {
+                         if (poly.isDiamond) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
+                         // Check for game over condition even during pause (polygons reaching top)
+                         if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) return triggerGameOver(`Polygon reached cage line during pause`);
+                     });
+                     return; // Skip physics and animations during pause
+                }
+
+                // --- Animate Returning Balls (Manual Animation) ---
+                for (let i = returningBalls.length - 1; i >= 0; i--) {
+                    const rBall = returningBalls[i];
+                    let arrived = false;
+
+                    // Phase 1: Ascend vertically in the tube
+                    if (!rBall.isMovingHorizontally) {
+                        rBall.y -= RETURN_BALL_SPEED_VERTICAL;
+                        // Check if reached the transition height to move sideways
+                        if (rBall.y <= HORIZONTAL_TRANSITION_Y) {
+                            rBall.y = HORIZONTAL_TRANSITION_Y; // Snap to exact height
+                            rBall.isMovingHorizontally = true; // Switch state
+                        }
+                    }
+                    // Phase 2: Move horizontally towards the hopper center
+                    else {
+                        const xDirection = Math.sign(rBall.targetX - rBall.x);
+                        rBall.x += xDirection * RETURN_BALL_SPEED_HORIZONTAL;
+
+                        // Check if passed the target X (accounting for direction)
+                        if ((xDirection > 0 && rBall.x >= rBall.targetX) ||
+                            (xDirection < 0 && rBall.x <= rBall.targetX) ||
+                             xDirection === 0)
+                        {
+                           rBall.x = rBall.targetX; // Snap to target X
+
+                           // Slight downward movement into final position
+                           rBall.y += RETURN_BALL_SPEED_VERTICAL * 0.5; // Move down slower
+
+                           // Check if reached final target Y
+                           if (rBall.y >= rBall.targetY) {
+                               rBall.y = rBall.targetY; // Snap to target Y
+                               arrived = true; // Mark as arrived
+                           }
+                        }
+                    }
+
+                    // Interpolate color from active to used based on travel progress
+                    const totalTravelEst = (CANVAS_HEIGHT - HORIZONTAL_TRANSITION_Y) + Math.abs(rBall.targetX - ((rBall.pathway === 'left') ? PATHWAY_WIDTH / 2 : PLAY_AREA_RIGHT + PATHWAY_WIDTH / 2));
+                    const currentTravelEst = (CANVAS_HEIGHT - rBall.y) + (rBall.isMovingHorizontally ? Math.abs(rBall.x - ((rBall.pathway === 'left') ? PATHWAY_WIDTH / 2 : PLAY_AREA_RIGHT + PATHWAY_WIDTH / 2)) : 0);
+                    rBall.color = interpolateHexColor(ACTIVE_BALL_COLOR, USED_BALL_COLOR, Math.min(1, Math.max(0, currentTravelEst / totalTravelEst)));
+
+                    // If ball has arrived at its destination
+                    if (arrived) {
+                        const returnedBallBody = rBall.body; // Get the original Matter body
+                        returningBalls.splice(i, 1); // Remove from animation list
+
+                        // Reset ball properties for hopper state
+                        returnedBallBody.isReturning = false;
+                        returnedBallBody.isHopper = true;
+                        returnedBallBody.isMovingHorizontally = false;
+                        returnedBallBody.render.fillStyle = USED_BALL_COLOR; // Set to used color
+                        // Clear any potential paused state info
+                        delete returnedBallBody.pausedVelocity;
+                        delete returnedBallBody.pausedAngularVelocity;
+
+                        // Re-add the body to the Matter.js world
+                        World.add(world, returnedBallBody);
+                        // Make it static and position it correctly
+                        Matter.Body.setStatic(returnedBallBody, true);
+                        Matter.Body.setVelocity(returnedBallBody, { x: 0, y: 0 }); // Zero out velocity/spin
+                        Matter.Body.setAngularVelocity(returnedBallBody, 0);
+                        Matter.Body.setPosition(returnedBallBody, { x: rBall.x, y: rBall.y }); // Set final position
+
+                        // Add the physical body back to the hopper array
+                        hopperBalls.push(returnedBallBody);
+
+                        // Check if this arrival means the turn can end
+                        checkEndTurnCondition();
+                    }
+                }
+
+                // --- Normal Update Logic (Physics, Polygons, Active Balls) ---
+                try {
+                    // Update diamond glow animation
+                    fadeAlpha = fadeAlpha + fadeDirection * 0.02; if (fadeAlpha <= 0 || fadeAlpha >= 1) fadeDirection *= -1; fadeAlpha = Math.max(0, Math.min(1, fadeAlpha));
+
+                    // Process polygons
+                    for (let i = polygons.length - 1; i >= 0; i--) {
+                        const poly = polygons[i]; if (!poly) continue;
+                        // Update diamond stroke style for glow
+                        if (poly.isDiamond && poly.render) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
+                        // Check Game Over condition
+                        if (poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) return triggerGameOver(`Polygon reached cage line`);
+                        // Remove destroyed polygons (value <= 0 and not a diamond)
+                        if (poly.value <= 0 && !poly.isDiamond) {
+                             if (World.get(world, poly.id, 'body')) World.remove(world, poly); // Check if exists before removing
+                             polygons.splice(i, 1);
+                        }
+                        // Update text value render property for non-diamonds
+                        else if (!poly.isDiamond && poly.render) { poly.render.textValue = Math.floor(poly.value).toString(); }
+                    }
+
+                    // Prune excess polygons if MAX_OBJECTS limit is stressed (remove oldest)
+                    if (polygons.length > MAX_OBJECTS * 0.85) {
+                         const excess = polygons.length - Math.floor(MAX_OBJECTS * 0.85);
+                         const removedPolys = polygons.splice(0, excess); // Remove from the start (oldest)
+                         World.remove(world, removedPolys);
+                    }
+
+                    // Process active balls
+                    activeBalls.forEach(ball => {
+                         // Only process balls that are actually active (not static/returning/hopper)
+                         if (!ball.isStatic && !ball.isReturning && !ball.isHopper) {
+                            // Speed limit
+                            const MAX_SPEED = 15; const MAX_SPEED_SQ = MAX_SPEED * MAX_SPEED;
+                            if (Vector.magnitudeSquared(ball.velocity) > MAX_SPEED_SQ) {
+                                Matter.Body.setVelocity(ball, Vector.mult(Vector.normalise(ball.velocity), MAX_SPEED));
+                            }
+                            // Ensure correct color
+                            if (ball.render.fillStyle !== ACTIVE_BALL_COLOR) ball.render.fillStyle = ACTIVE_BALL_COLOR;
+
+                            // Anti-stuck mechanism (kick slow balls)
+                            if (pauseResumeGraceTicks <= 0 && ball.speed < STUCK_SPEED_THRESHOLD && ball.position.y < STUCK_ESCAPE_ZONE_Y) {
+                                const kickVx = (Math.random() - 0.5) * STUCK_KICK_VX_AMP;
+                                const kickVy = STUCK_KICK_VY_MIN - (Math.random() * STUCK_KICK_VY_RAND);
+                                Matter.Body.setVelocity(ball, Vector.add(ball.velocity, { x: kickVx, y: kickVy }));
+                            }
+
+                            // Manual boundary enforcement (more reliable than just walls sometimes)
+                            const wallRestitution = 0.9;
+                            if (ball.position.x < PLAY_AREA_LEFT + BALL_RADIUS) {
+                                Matter.Body.setPosition(ball, { x: PLAY_AREA_LEFT + BALL_RADIUS + 0.1, y: ball.position.y });
+                                Matter.Body.setVelocity(ball, { x: Math.abs(ball.velocity.x) * wallRestitution, y: ball.velocity.y });
+                            } else if (ball.position.x > PLAY_AREA_RIGHT - BALL_RADIUS) {
+                                Matter.Body.setPosition(ball, { x: PLAY_AREA_RIGHT - BALL_RADIUS - 0.1, y: ball.position.y });
+                                Matter.Body.setVelocity(ball, { x: -Math.abs(ball.velocity.x) * wallRestitution, y: ball.velocity.y });
+                            }
+
+                            // Fallback: Catch balls falling through the floor (shouldn't happen often)
+                             if (ball.position.y > CANVAS_HEIGHT + 50) {
+                                 console.warn(`Ball ${ball.id} fell through! Forcing return.`);
+                                  const ballIndex = activeBalls.findIndex(b => b.id === ball.id);
+                                  if (ballIndex !== -1 && !ball.isReturning) {
+                                       // Force start the return process immediately
+                                       ball.isReturning = true; ball.isMovingHorizontally = false;
+                                       const exitingBall = activeBalls.splice(ballIndex, 1)[0];
+                                       World.remove(world, exitingBall);
+                                       const pathway = nextReturnPathway;
+                                       const entryX = (pathway === 'left') ? PATHWAY_WIDTH / 2 : PLAY_AREA_RIGHT + PATHWAY_WIDTH / 2;
+                                       const targetY = HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET;
+                                       const targetX = HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET;
+                                       returningBalls.push({ body: exitingBall, x: entryX, y: CANVAS_HEIGHT - BALL_RADIUS, targetX: targetX, targetY: targetY, pathway: pathway, radius: BALL_RADIUS, color: ACTIVE_BALL_COLOR, isMovingHorizontally: false });
+                                       nextReturnPathway = (pathway === 'left') ? 'right' : 'left';
+                                       checkEndTurnCondition(); // Check if turn ends
+                                   }
+                             }
+                        }
+                    });
+
+                    // Re-check end turn condition if turn was in progress but might have ended due to last ball returning etc.
+                    if (turnInProgress && activeBalls.length === 0 && returningBalls.length === 0 && !isPausing) {
+                         checkEndTurnCondition();
+                    }
+
+                } catch (error) { console.error("Update loop error:", error); triggerGameOver("Update loop error"); }
+            });
+
+            // --- Mouse and Input Handling ---
+            let mousePos = { x: 0, y: 0 };
+
+            render.canvas.addEventListener('mousedown', (e) => {
+                if (e.button === 0) { // Left Click
+                    if (gameOver) return;
+                    mousePos = { x: e.offsetX, y: e.offsetY }; // Record mouse position
+                    // If turn is in progress (balls are moving) -> Pause
+                    if (turnInProgress && activeBalls.length > 0) {
+                        if (!isPausing) { // Only pause if not already paused
+                            isPausing = true;
+                            aiming = false; // Cannot aim while paused
+                            console.log("Pausing turn.");
+                            pauseResumeGraceTicks = 0; // Reset grace period
+                            // Make all active balls static and store their velocity
+                            activeBalls.forEach(ball => {
+                                if (!ball.isStatic && !ball.isReturning && !ball.isHopper) { // Check it's a physics-active ball
+                                    ball.pausedVelocity = Vector.clone(ball.velocity); // Store current velocity
+                                    ball.pausedAngularVelocity = ball.angularVelocity; // Store angular velocity
+                                    Matter.Body.setStatic(ball, true); // Make it static
+                                }
+                            });
+                        }
+                    }
+                    // If turn is NOT in progress and not aiming -> Start Aiming
+                    else if (!aiming && !turnInProgress && hopperBalls.length > 0) {
+                        aiming = true;
+                        isPausing = false; // Ensure not paused when starting to aim
+                    }
+                }
+                 else if (e.button === 2) { // Right Click
+                    e.preventDefault(); // Prevent context menu
+                    if (gameOver) { restartGame(); } // Restart if game is over
+                    else {
+                        // Double-click detection for speed toggle
+                        const currentTime = Date.now();
+                        if (currentTime - lastRightClickTime < DOUBLE_CLICK_THRESHOLD) {
+                            // Toggle speed only if NOT paused
+                            if (!isPausing) {
+                                isSpedUp = !isSpedUp;
+                                engine.timing.timeScale = isSpedUp ? 3 : 1; // Set timescale
+                                console.log(`Game speed toggled: ${engine.timing.timeScale}`);
+                            }
+                            lastRightClickTime = 0; // Reset double-click timer
+                        } else {
+                            lastRightClickTime = currentTime; // Record first click time
+                        }
+                    }
+                 }
+             });
+
+            render.canvas.addEventListener('mousemove', (e) => {
+                 // Update mouse position only if aiming or paused (for re-aiming)
+                 if ((aiming || isPausing) && !gameOver) {
+                    mousePos = { x: e.offsetX, y: e.offsetY };
+                 }
+             });
+
+            render.canvas.addEventListener('mouseup', (e) => {
+                if (gameOver || e.button !== 0) return; // Ignore if game over or not left click
+                const endPos = { x: e.offsetX, y: e.offsetY };
+
+                if (isPausing) { // --- Resume from Pause ---
+                    isPausing = false;
+                    console.log("Resuming turn.");
+                    const direction = Vector.sub(endPos, startPos); // Calculate vector from start to release point
+                    let newLaunchVelocity = null;
+                    let reAimIsValid = false;
+
+                    // Check if drag was significant and downwards enough for a re-aim
+                    if (direction.y > 5 && Vector.magnitudeSquared(direction) > 20 * 20) {
+                        const angle = Math.atan2(direction.y, direction.x);
+                        // Check if angle is within valid launch range (not too horizontal)
+                        if (!(angle > -Math.PI * 0.98 && angle < -Math.PI * 0.02) && !(angle < Math.PI * 0.02 && angle > -Math.PI * 0.02)) {
+                            newLaunchVelocity = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
+                            reAimIsValid = true;
+                            launchDirection = Vector.clone(newLaunchVelocity); // Store the new direction
+                            console.log(`Re-aim valid. New Direction: {x: ${launchDirection.x.toFixed(2)}, y: ${launchDirection.y.toFixed(2)}}`);
+                        } else { console.log("Re-aim cancelled - invalid angle."); }
+                    } else { console.log("Re-aim cancelled - drag invalid."); }
+
+                    // Apply velocities to unpaused balls
+                    activeBalls.forEach((ball) => {
+                        // Only unfreeze balls that were actually paused
+                        if (ball.isStatic && !ball.isReturning && !ball.isHopper && ball.pausedVelocity) {
+                             Matter.Body.setStatic(ball, false); // Unfreeze
+                             // Apply new velocity if re-aimed, otherwise restore old velocity
+                             if (reAimIsValid && newLaunchVelocity) {
+                                 Matter.Body.setVelocity(ball, newLaunchVelocity);
+                             } else {
+                                 Matter.Body.setVelocity(ball, ball.pausedVelocity);
+                                 Matter.Body.setAngularVelocity(ball, ball.pausedAngularVelocity || 0);
+                             }
+                             // Clear paused state
+                             delete ball.pausedVelocity;
+                             delete ball.pausedAngularVelocity;
+                        } else if (ball.isStatic && !ball.isReturning && !ball.isHopper) {
+                            // Catch edge case where a ball might be static without pause data
+                            console.warn(`Ball ${ball.id} static but no pausedVelocity. Unfreezing.`);
+                            Matter.Body.setStatic(ball, false);
+                        }
+                    });
+                    pauseResumeGraceTicks = PAUSE_RESUME_GRACE_TICKS_TOTAL; // Grant brief immunity to stuck-kick
+
+                } else if (aiming) { // --- Execute Initial Launch ---
+                    aiming = false;
+                    const direction = Vector.sub(endPos, startPos); // Calculate launch vector
+
+                    // Check if drag was significant and downwards enough
+                    if (direction.y > 5 && Vector.magnitudeSquared(direction) > 40 * 40) {
+                         const angle = Math.atan2(direction.y, direction.x);
+                         // Check if angle is valid
+                         if (!(angle > -Math.PI * 0.98 && angle < -Math.PI * 0.02) && !(angle < Math.PI * 0.02 && angle > -Math.PI * 0.02)) {
+                            turnInProgress = true; // Turn starts now!
+                            pauseResumeGraceTicks = 0; // No grace period on initial launch
+                            launchDirection = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE); // Calculate launch velocity
+                            console.log(`Initial Launch. Turn Direction: {x: ${launchDirection.x.toFixed(2)}, y: ${launchDirection.y.toFixed(2)}}`);
+
+                            // Determine how many balls to actually launch
+                            // Based on the target count for *this* round (nextRoundBallCount) and available physical balls
+                            const countToLaunch = Math.min(hopperBalls.length, nextRoundBallCount);
+                            if (countToLaunch === 0) {
+                                console.error("Launch Error: No balls available in hopper!");
+                                turnInProgress = false; // Cannot start turn without balls
+                                return;
+                            }
+                            currentLaunchCount = countToLaunch; // Track how many we *actually* launch this turn
+                            console.log(`Target balls: ${nextRoundBallCount}, Available in hopper: ${hopperBalls.length}. Launching ${currentLaunchCount} balls.`);
+
+                            // Take the balls from the hopper
+                            const ballsToLaunch = hopperBalls.splice(0, currentLaunchCount);
+
+                            // Launch balls sequentially with a small delay
+                            ballsToLaunch.forEach((ball, index) => {
+                                // Update ball state from hopper to active
+                                ball.isHopper = false;
+                                ball.isReturning = false;
+                                ball.isMovingHorizontally = false;
+                                ball.render.fillStyle = ACTIVE_BALL_COLOR; // Set active color
+                                // Clear any residual paused state
+                                delete ball.pausedVelocity;
+                                delete ball.pausedAngularVelocity;
+
+                                // Add to the active balls list
+                                activeBalls.push(ball);
+
+                                // Apply launch physics after delay
+                                setTimeout(() => {
+                                    // Check game state hasn't changed (e.g., game over during launch sequence)
+                                    if (!gameOver && !isPausing) {
+                                        Matter.Body.setStatic(ball, false); // Unfreeze
+                                        Matter.Body.setPosition(ball, startPos); // Ensure starts at launch point
+                                        Matter.Body.setVelocity(ball, launchDirection); // Apply launch velocity
+                                        Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05); // Add slight spin
+                                    } else {
+                                        // Game ended/paused mid-launch - try to return ball to hopper state safely
+                                        console.warn("Game ended/paused during launch sequence for ball:", ball.id);
+                                        // Remove from active if added, put back in hopper if not already there
+                                        if (activeBalls.includes(ball)) activeBalls.splice(activeBalls.indexOf(ball), 1);
+                                        if (!hopperBalls.includes(ball)) hopperBalls.unshift(ball); // Add back to front of hopper
+                                        // Reset to hopper state
+                                        Matter.Body.setStatic(ball, true);
+                                        ball.render.fillStyle = USED_BALL_COLOR;
+                                        ball.isHopper = true;
+                                        // Reposition in hopper area
+                                        Matter.Body.setPosition(ball, { x: HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET, y: HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET });
+                                    }
+                                }, index * 80); // Stagger launch delay
+                            });
+                        } else { console.log("Initial launch cancelled - invalid angle."); turnInProgress = false; }
+                    } else { console.log("Initial launch cancelled - drag invalid."); turnInProgress = false; }
+                }
+            });
+
+            render.canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); }); // Prevent right-click menu
+
+            // --- Rendering Logic (After Update) ---
+            Events.on(render, 'afterRender', function() {
+                 const context = render.context;
+                 context.save(); // Save context state
+
+                 // Set composite operation. 'source-over' means new drawings go on top.
+                 context.globalCompositeOperation = 'source-over';
+
+                 // --- Draw Custom Elements ---
+
+                 // 1. Draw Pathways (These are drawn FIRST, behind everything else on the canvas)
+                 // Note: The actual background color is set by the container/playAreaBackground divs.
+                 // This function can add details like gradients or tube effects if desired.
+                 // Currently keeping it simple as CSS handles the main background areas.
+                 // drawPathways(context); // Example: Could draw gradients here
+
+                 // 2. Draw Polygons' Text Values (on top of Matter's rendering of the polygon body)
+                 polygons.forEach(poly => {
+                     // Only draw text for non-diamond polygons that have a text value defined
+                     if (poly.render && poly.render.textValue && !poly.isDiamond) {
+                         context.font = `${poly.render.textSize || 12}px ${poly.render.textFont || 'Arial'}`;
+                         context.textAlign = 'center';
+                         context.textBaseline = 'middle';
+                         // Draw outline (stroke) then fill for better readability
+                         context.strokeStyle = 'rgba(0,0,0,0.7)';
+                         context.lineWidth = 2;
+                         context.strokeText(poly.render.textValue, poly.position.x, poly.position.y);
+                         context.fillStyle = poly.render.textColor || '#ffffff';
+                         context.fillText(poly.render.textValue, poly.position.x, poly.position.y);
+                     }
+                 });
+
+                 // 3. Draw Returning Balls (Manual animation)
+                 returningBalls.forEach(rBall => {
+                     context.beginPath();
+                     context.arc(rBall.x, rBall.y, rBall.radius, 0, Math.PI * 2);
+                     context.fillStyle = rBall.color; // Use the interpolated color
+                     context.fill();
+                     context.strokeStyle = '#555'; // Optional outline
+                     context.lineWidth = 0.5;
+                     context.stroke();
+                 });
+
+                 // 4. Draw Cage Line (Game Over Line)
+                 if (!gameOver) {
+                     context.beginPath();
+                     context.strokeStyle = '#CC0000'; // Red color for danger
+                     context.lineWidth = CAGE_LINE_WIDTH;
+                     context.setLineDash([]); // Solid line
+                     const leftLineEndX = HOPPER_CENTER_X - CAGE_GAP_WIDTH / 2; // Gap in the middle
+                     const rightLineStartX = HOPPER_CENTER_X + CAGE_GAP_WIDTH / 2;
+                     // Draw line segments
+                     context.moveTo(PLAY_AREA_LEFT, CAGE_Y_POSITION); // Start at left play boundary
+                     context.lineTo(leftLineEndX, CAGE_Y_POSITION); // Line to gap start
+                     context.moveTo(rightLineStartX, CAGE_Y_POSITION); // Move to gap end
+                     context.lineTo(PLAY_AREA_RIGHT, CAGE_Y_POSITION); // Line to right play boundary
+                     context.stroke();
+                 }
+
+                 // 5. Draw Aiming Line / Re-aiming Line
+                 if ((aiming || isPausing) && !gameOver) { // Draw if aiming OR paused (for re-aim)
+                     context.beginPath();
+                     context.strokeStyle = '#000000'; // Black aiming line
+                     context.lineWidth = 2;
+                     context.setLineDash([10, 5]); // Dashed line effect
+                     const dx = mousePos.x - startPos.x;
+                     const dy = mousePos.y - startPos.y;
+                     // Only draw if pointing downwards significantly
+                     if (dy > 5) {
+                         const angle = Math.atan2(dy, dx);
+                         // Check if angle is valid (not too horizontal)
+                         if (!(angle > -Math.PI * 0.98 && angle < -Math.PI * 0.02) && !(angle < Math.PI * 0.02 && angle > -Math.PI * 0.02)) {
+                             // Calculate a long line endpoint
+                             let endX = startPos.x + Math.cos(angle) * CANVAS_HEIGHT * 2; // Extend far
+                             let endY = startPos.y + Math.sin(angle) * CANVAS_HEIGHT * 2;
+
+                             // --- Intersection checks (optional, for cleaner line end) ---
+                             // Find intersection with left/right/bottom bounds if needed,
+                             // but limiting length might be simpler.
+
+                             // Limit the length of the aiming line for visual clarity
+                             const length = Math.min(Vector.magnitude({x: dx, y: dy}), 250); // Max length 250px
+                             context.moveTo(startPos.x, startPos.y);
+                             context.lineTo(startPos.x + Math.cos(angle) * length, startPos.y + Math.sin(angle) * length);
+                             context.stroke();
+                         }
+                     }
+                     context.setLineDash([]); // Reset line dash
+                 }
+
+                 context.restore(); // Restore context state
+              });
+
+            // --- Helper Drawing Functions ---
+            // Example: Function to draw gradients in pathways (called from afterRender if needed)
+            function drawPathways(context) {
+                 // Optional: Draw subtle gradients or tube effects in the pathways
+                 const gradientLeft = context.createLinearGradient(0, 0, PATHWAY_WIDTH, 0);
+                 gradientLeft.addColorStop(0, "rgba(0,0,0,0.2)"); // Darker edge
+                 gradientLeft.addColorStop(0.3, "rgba(255,255,255,0.1)"); // Lighter center
+                 gradientLeft.addColorStop(0.7, "rgba(255,255,255,0.1)");
+                 gradientLeft.addColorStop(1, "rgba(0,0,0,0.2)"); // Darker edge
+                 context.fillStyle = gradientLeft;
+                 context.fillRect(0, 0, PATHWAY_WIDTH, CANVAS_HEIGHT); // Fill left pathway area
+
+                 const gradientRight = context.createLinearGradient(PLAY_AREA_RIGHT, 0, PLAY_AREA_RIGHT + PATHWAY_WIDTH, 0);
+                 gradientRight.addColorStop(0, "rgba(0,0,0,0.2)");
+                 gradientRight.addColorStop(0.3, "rgba(255,255,255,0.1)");
+                 gradientRight.addColorStop(0.7, "rgba(255,255,255,0.1)");
+                 gradientRight.addColorStop(1, "rgba(0,0,0,0.2)");
+                 context.fillStyle = gradientRight;
+                 context.fillRect(PLAY_AREA_RIGHT, 0, PATHWAY_WIDTH, CANVAS_HEIGHT); // Fill right pathway area
+            }
+
+            // --- Restart Game Function ---
+             function restartGame() {
+                 console.log("Executing restartGame...");
+                 // Stop any flashing intervals
+                 if (scoreFlashInterval) clearInterval(scoreFlashInterval);
+                 scoreFlashInterval = null;
+
+                 // Clear Matter.js world and engine
+                 World.clear(world);
+                 Engine.clear(engine);
+
+                 // Reset engine properties
+                 engine.gravity.y = 1.0;
+                 engine.timing.timeScale = 1;
+                 engine.positionIterations = 12;
+                 engine.velocityIterations = 12;
+                 isSpedUp = false;
+
+                 // Reset game state variables
+                 score = 0;
+                 activeBalls = [];
+                 returningBalls = []; // Clear balls in tubes
+                 hopperBalls = [];
+                 polygons = [];
+                 gameOver = false;
+                 aiming = false;
+                 isPausing = false;
+                 turnInProgress = false;
+                 pauseResumeGraceTicks = 0;
+                 currentLaunchCount = 0;
+                 nextRoundBallCount = 1; // Start with 1 ball again
+                 round = 1;
+                 rowCount = 0;
+                 launchDirection = null;
+                 startPos = { x: FIXED_START_X, y: LAUNCH_POINT_Y };
+                 lastRightClickTime = 0;
+                 nextReturnPathway = 'left'; // Reset pathway choice
+
+                 // Reset UI elements
+                 document.getElementById('gameOver').style.display = 'none';
+                 document.getElementById('scoreDisplay').style.display = 'none';
+                 document.getElementById('scoreDisplay').style.visibility = 'visible'; // Ensure visible
+                 document.getElementById('gameOver').innerHTML = 'GAME OVER'; // Reset text
+
+                 // Re-add static world boundaries and sensor
+                 World.add(world, [
+                    Bodies.rectangle(PLAY_AREA_LEFT + 2, CANVAS_HEIGHT / 2 + TOP_UI_HEIGHT/2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { visible: false } }),
+                    Bodies.rectangle(PLAY_AREA_RIGHT - 2, CANVAS_HEIGHT / 2 + TOP_UI_HEIGHT/2, 4, CANVAS_HEIGHT, { isStatic: true, restitution: 0.9, friction: 0.0, collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { visible: false } }),
+                    Bodies.rectangle(HOPPER_CENTER_X, CANVAS_HEIGHT + 30, PLAY_AREA_WIDTH, 60, { isStatic: true, isSensor: true, label: 'bottomSensor', collisionFilter: { category: defaultCategory, mask: ballCategory }, render: { visible: false } })
+                 ]);
+
+                 // Setup initial game state
+                 setupInitialBalls(1); // Add the first ball
+                 createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT); // Add the first row of polygons
+                 updateBanner(); // Update UI display
+                 console.log("Game restarted. Hopper balls:", hopperBalls.length);
+            }
+             // Add keyboard listener for restart (R key)
+             window.addEventListener('keydown', (e) => {
+                 if (!e.repeat && (e.key === 'r' || e.key === 'R')) {
+                     restartGame();
+                 }
+             });
+
+            // --- End Turn Logic ---
+            function endTurn() {
+                if (gameOver || isPausing) return; // Don't end turn if game over or paused
+                console.log(`>>> Executing endTurn for end of round ${round}. Target balls next round: ${nextRoundBallCount}. Hopper count now: ${hopperBalls.length}`);
+
+                // Reset states potentially active at turn end
+                pauseResumeGraceTicks = 0;
+                if (isSpedUp) { // Reset speed if it was on
+                    isSpedUp = false;
+                    engine.timing.timeScale = 1;
+                    console.log("Resetting game speed at end of turn.");
+                }
+
+                // Safety checks: Ensure no balls are somehow left active or returning
+                if (activeBalls.length > 0) {
+                     console.warn("EndTurn: Active balls remain! Removing.");
+                     World.remove(world, activeBalls); // Remove from physics
+                     activeBalls = []; // Clear array
+                }
+                if (returningBalls.length > 0) {
+                     console.warn("EndTurn: Returning balls remain! Clearing list.");
+                     // Bodies are already removed from world, just clear the animation list
+                     returningBalls = [];
+                }
+
+                // --- Sanity Check and Cleanup for Hopper Balls ---
+                // This ensures the hopper count matches the target count for the *next* round
+                // This logic assumes `nextRoundBallCount` is the correct number that *should* be in the hopper now.
+
+                // Ensure target ball count is at least 1
+                if (nextRoundBallCount <= 0) {
+                     console.warn("EndTurn: nextRoundBallCount is zero or negative, resetting to 1.");
+                     nextRoundBallCount = 1;
+                }
+
+                // If hopper has MORE balls than the target (e.g., due to timing issues or bugs)
+                 const excess = hopperBalls.length - nextRoundBallCount;
+                 if (excess > 0) {
+                     console.warn(`EndTurn: Hopper count (${hopperBalls.length}) exceeds target (${nextRoundBallCount}). Removing ${excess} excess balls.`);
+                     // Remove excess balls from the hopper array and the world
+                     const ballsToRemove = hopperBalls.splice(0, excess); // Remove from the start (arbitrary)
+                     World.remove(world, ballsToRemove);
+                 }
+                 // If hopper has FEWER balls than the target (e.g. diamond ball wasn't added correctly, or balls lost)
+                 else if (hopperBalls.length < nextRoundBallCount) {
+                     console.warn(`EndTurn: Hopper count (${hopperBalls.length}) is less than target (${nextRoundBallCount}). Adding ${nextRoundBallCount - hopperBalls.length} missing balls.`);
+                     const needed = nextRoundBallCount - hopperBalls.length;
+                     for (let i = 0; i < needed; i++) {
+                         // Create and add missing balls directly to hopper
+                         const newBall = createBallBody(
+                             HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET * 2,
+                             HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET, true );
+                         Matter.Body.setStatic(newBall, true);
+                         World.add(world, newBall);
+                         hopperBalls.push(newBall);
+                     }
+                 }
+
+                 // Ensure all balls currently in the hopper are correctly configured (static, color, etc.)
+                 hopperBalls.forEach(ball => {
+                    if (!ball.isStatic) Matter.Body.setStatic(ball, true);
+                    if (!ball.isHopper) ball.isHopper = true;
+                    ball.render.fillStyle = USED_BALL_COLOR;
+                    // Slight random nudge to prevent perfect stacking issues
+                    Matter.Body.setPosition(ball, { x: ball.position.x + (Math.random() - 0.5) * 0.1, y: ball.position.y + (Math.random() - 0.5) * 0.1 });
+                    Matter.Body.setVelocity(ball, { x: 0, y: 0 }); // Ensure no residual velocity
+                    Matter.Body.setAngularVelocity(ball, 0);
+                 });
+
+
+                // --- Polygon Movement and Game Over Check ---
+                let triggeredGameOver = false;
+                polygons.forEach(poly => {
+                     // Move each polygon up by ROW_HEIGHT
+                     Matter.Body.translate(poly, { x: 0, y: -ROW_HEIGHT });
+                     // Check if this move caused the polygon to cross the cage line
+                     if (!triggeredGameOver && poly.position.y - POLYGON_RADIUS < CAGE_Y_POSITION) {
+                         triggeredGameOver = true;
+                         // Use setTimeout to trigger game over slightly after the movement completes visually
+                         setTimeout(() => triggerGameOver(`Polygon reached cage line after move`), 50);
+                     }
+                 });
+                if (triggeredGameOver) return; // Stop endTurn process if game over condition met
+
+                // --- Add New Polygon Row ---
+                // Check if adding a new row would exceed object limits
+                 const availableSpaceForPolys = MAX_OBJECTS - hopperBalls.length - polygons.length; // Active/Returning are 0 here
+                 const polysInRowEstimate = Math.floor((PLAY_AREA_WIDTH - 40) / POLYGON_SPACING) + 1;
+                 if (availableSpaceForPolys >= polysInRowEstimate) {
+                    createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT); // Add new row at the bottom
+                 } else {
+                    console.log(`Not enough space for full polygon row based on MAX_OBJECTS limit (${MAX_OBJECTS}). Current: ${hopperBalls.length + polygons.length}.`);
+                 }
+
+                // --- Update State for Next Round ---
+                round++;
+                turnInProgress = false; // Ensure turn is marked as not in progress
+                aiming = false;
+                isPausing = false;
+                launchDirection = null; // Reset launch direction
+                currentLaunchCount = 0; // Reset count launched for the *next* turn
+
+                updateBanner(); // Update banner with new round, score, and the target ball count for the upcoming launch
+                console.log(`<<< Starting round ${round}. Target balls for launch: ${nextRoundBallCount}. Total hopper balls now: ${hopperBalls.length}`);
+            }
+
+            // --- Start the Game ---
+            Engine.run(engine);
+            Render.run(render);
+            console.log("Game Initialized. Engine and Renderer running.");
+
+        } catch (error) {
+            // Catch initialization errors
+            console.error('Game failed to initialize:', error);
+            document.body.innerHTML += `<p style="color: red; position: absolute; top: 100px; left: 10px; background: white; padding: 10px; border: 1px solid black;">Error loading game: ${error.message}. Check console.</p>`;
+        }
+    </script>
+</body>
+</html>
