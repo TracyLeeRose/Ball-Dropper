@@ -85,7 +85,7 @@
             const RETURN_BALL_SPEED_HORIZONTAL = 10.5;
             const HORIZONTAL_TRANSITION_Y = HOPPER_Y + BALL_RADIUS + 5;
 
-            const LAUNCH_STAGGER_MS = 10; // Reduced stagger
+            const LAUNCH_STAGGER_MS = 75; 
 
             const render = Render.create({
                 element: document.getElementById('gameContainer'),
@@ -109,14 +109,15 @@
             let hopperBalls = [];
             let polygons = [];
             let nextReturnPathway = 'left';
-            let gameOver = false, aiming = false, turnInProgress = false, isPausing = false;
-            let launchInProgressFlag = false; // New flag
+            let gameOver = false, aiming = false, turnInProgress = false, isPausingForMidTurnBodyReAim = false;
+            let launchInProgressFlag = false; // True WHILE the initial volley of balls is being launched
+            let isReAimingDuringLaunchVolley = false; // True if mousedown happens during launchInProgressFlag
             let startPos = { x: FIXED_START_X, y: LAUNCH_POINT_Y };
             let round = 1;
             let currentLaunchCount = 0;
             let nextRoundBallCount = 1;
             let rowCount = 0;
-            let launchDirection = null;
+            let launchDirection = null; // Dynamically updated for current volley
             const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96c93d', '#ffa502'];
             const DIAMOND_COLOR = '#000000', ACTIVE_BALL_COLOR = '#ff4500', USED_BALL_COLOR = '#808080';
             let fadeAlpha = 0, fadeDirection = 1, scoreFlashInterval = null;
@@ -214,7 +215,7 @@
             updateBanner();
 
             Events.on(engine, 'collisionStart', function(event) {
-                if (gameOver || isPausing) return;
+                if (gameOver || isPausingForMidTurnBodyReAim) return;
                 const pairs = event.pairs;
                 pairs.forEach(pair => {
                     let ball = null, other = null;
@@ -252,13 +253,13 @@
              }
 
             function checkEndTurnCondition() {
-                if (gameOver || isPausing || !turnInProgress || endTurnPending) {
+                if (gameOver || isPausingForMidTurnBodyReAim || !turnInProgress || endTurnPending) { // also check isPausingForMidTurnBodyReAim
                     return;
                 }
-                if (activeBalls.length === 0 && returningBalls.length === 0) {
+                if (activeBalls.length === 0 && returningBalls.length === 0 && !launchInProgressFlag) { // ensure volley is complete
                     endTurnPending = true;
                     setTimeout(() => {
-                        if (!gameOver && !isPausing && turnInProgress && activeBalls.length === 0 && returningBalls.length === 0) {
+                        if (!gameOver && !isPausingForMidTurnBodyReAim && turnInProgress && activeBalls.length === 0 && returningBalls.length === 0 && !launchInProgressFlag) {
                             endTurn();
                         } else {
                             endTurnPending = false;
@@ -270,8 +271,8 @@
             function triggerGameOver(reason = "Game Over") {
                 if (gameOver) return;
                 gameOver = true;
-                aiming = false; isPausing = false; turnInProgress = false; endTurnPending = false;
-                launchInProgressFlag = false; // Reset flag
+                aiming = false; isPausingForMidTurnBodyReAim = false; turnInProgress = false; endTurnPending = false;
+                launchInProgressFlag = false; isReAimingDuringLaunchVolley = false;
                 pauseResumeGraceTicks = 0;
                 isSpedUp = false; engine.timing.timeScale = 1;
                 console.log("Game over triggered:", reason, "- Final Score:", score);
@@ -292,7 +293,8 @@
                 if (gameOver) return;
                 if (pauseResumeGraceTicks > 0) pauseResumeGraceTicks--;
 
-                if (isPausing) {
+                // This specific pause type is for re-aiming BODIES mid-turn, after volley.
+                if (isPausingForMidTurnBodyReAim) { 
                      fadeAlpha = fadeAlpha + fadeDirection * 0.02; if (fadeAlpha <= 0 || fadeAlpha >= 1) fadeDirection *= -1; fadeAlpha = Math.max(0, Math.min(1, fadeAlpha));
                      polygons.forEach(poly => {
                          if (poly.isDiamond) poly.render.strokeStyle = `rgba(255, 0, 0, ${fadeAlpha})`;
@@ -300,13 +302,14 @@
                      });
                      return;
                 }
+                // Note: isReAimingDuringLaunchVolley does NOT pause the engine, it's just a state flag.
 
                 if (ballsPendingReturnSetup.length > 0) {
                     const ballsToProcessNow = [...ballsPendingReturnSetup];
                     ballsPendingReturnSetup = [];
                     ballsToProcessNow.forEach(ballToReturn => {
                         const ballIndex = activeBalls.findIndex(b => b.id === ballToReturn.id);
-                        if (!isPausing && !gameOver && ballIndex !== -1 && !ballToReturn.isReturning) {
+                        if (!isPausingForMidTurnBodyReAim && !gameOver && ballIndex !== -1 && !ballToReturn.isReturning) {
                             ballToReturn.isReturning = true; ballToReturn.isMovingHorizontally = false;
                             const exitingBall = activeBalls.splice(ballIndex, 1)[0];
                             World.remove(world, exitingBall);
@@ -385,7 +388,7 @@
                                     nextReturnPathway = (pathway === 'left') ? 'right' : 'left'; checkEndTurnCondition(); continue;
                                 }}
                         }}
-                    if (turnInProgress && activeBalls.length === 0 && returningBalls.length === 0 && !isPausing) { checkEndTurnCondition(); }
+                    if (turnInProgress && activeBalls.length === 0 && returningBalls.length === 0 && !launchInProgressFlag) { checkEndTurnCondition(); } // Check if volley is done
                 } catch (error) { console.error("Update loop error:", error); triggerGameOver("Update loop error"); }
             });
 
@@ -394,99 +397,176 @@
                 if (e.button === 0) {
                     if (gameOver) return;
                     mousePos = { x: e.offsetX, y: e.offsetY };
-                    if (turnInProgress && activeBalls.length > 0) {
-                        if (launchInProgressFlag) { // Check flag
-                            console.log("Launch in progress, mousedown ignored for pausing.");
-                            return;
-                        }
-                        if (!isPausing) {
-                            isPausing = true; aiming = false; pauseResumeGraceTicks = 0;
-                            activeBalls.forEach(ball => {
-                                if (!ball.isStatic && !ball.isReturning && !ball.isHopper) {
-                                    ball.pausedVelocity = Vector.clone(ball.velocity); ball.pausedAngularVelocity = ball.angularVelocity;
-                                    Matter.Body.setStatic(ball, true);
-                                }});
-                        }
-                    } else if (!aiming && !turnInProgress && hopperBalls.length > 0) {
-                        aiming = true; isPausing = false;
+
+                    if (launchInProgressFlag) { // If balls are currently launching in a volley
+                        isReAimingDuringLaunchVolley = true;
+                        aiming = false; // Not an initial aim
+                        isPausingForMidTurnBodyReAim = false; // Not pausing bodies
+                        console.log("Mousedown: Re-aiming during current launch volley.");
                     }
-                } else if (e.button === 2) {
+                    // This is for re-aiming bodies AFTER the initial volley is complete but turn is still in progress
+                    else if (turnInProgress && activeBalls.length > 0 && !launchInProgressFlag && !isPausingForMidTurnBodyReAim) {
+                        isPausingForMidTurnBodyReAim = true;
+                        aiming = false; 
+                        isReAimingDuringLaunchVolley = false;
+                        pauseResumeGraceTicks = 0;
+                        console.log("Mousedown: PAUSING for mid-turn BODY re-aim. Active balls:", activeBalls.length);
+                        activeBalls.forEach(ball => {
+                            if (!ball.isStatic && !ball.isReturning && !ball.isHopper) {
+                                ball.pausedVelocity = Vector.clone(ball.velocity);
+                                ball.pausedAngularVelocity = ball.angularVelocity;
+                                Matter.Body.setStatic(ball, true);
+                            }
+                        });
+                    } 
+                    // This is for the very first aim of a turn
+                    else if (!aiming && !turnInProgress && hopperBalls.length > 0) {
+                        aiming = true;
+                        isPausingForMidTurnBodyReAim = false;
+                        isReAimingDuringLaunchVolley = false;
+                        console.log("Mousedown: Starting INITIAL aiming for new turn.");
+                    }
+                    else if (turnInProgress && launchInProgressFlag) { // Should be caught by the first if, but for clarity
+                        console.log("Mousedown: Launch volley in progress. Flag isReAimingDuringLaunchVolley should be set.");
+                    }
+
+                } else if (e.button === 2) { 
                     e.preventDefault();
                     if (gameOver) { restartGame(); }
                     else {
                         const currentTime = Date.now();
                         if (currentTime - lastRightClickTime < DOUBLE_CLICK_THRESHOLD) {
-                            if (!isPausing) { isSpedUp = !isSpedUp; engine.timing.timeScale = isSpedUp ? 3 : 1; }
+                            if (!isPausingForMidTurnBodyReAim && !isReAimingDuringLaunchVolley) { // Only speed up if not in a re-aiming action
+                                isSpedUp = !isSpedUp; engine.timing.timeScale = isSpedUp ? 3 : 1; 
+                            }
                             lastRightClickTime = 0;
                         } else { lastRightClickTime = currentTime; }
-                    }}
+                    }
+                }
              });
-            render.canvas.addEventListener('mousemove', (e) => { if ((aiming || isPausing) && !gameOver) { mousePos = { x: e.offsetX, y: e.offsetY }; } });
+
+            render.canvas.addEventListener('mousemove', (e) => { 
+                // Show aim line if: initial aiming OR re-aiming during volley OR re-aiming paused bodies
+                if ((aiming || isReAimingDuringLaunchVolley || isPausingForMidTurnBodyReAim) && !gameOver) { 
+                    mousePos = { x: e.offsetX, y: e.offsetY }; 
+                }
+            });
+
             render.canvas.addEventListener('mouseup', (e) => {
                 if (gameOver || e.button !== 0) return;
                 const endPos = { x: e.offsetX, y: e.offsetY };
-                if (isPausing) { // Resume from Pause
-                    isPausing = false; const direction = Vector.sub(endPos, startPos); let newLaunchVelocity = null; let reAimIsValid = false;
-                    if (direction.y > 5 && Vector.magnitudeSquared(direction) > 20 * 20) {
-                        const angle = Math.atan2(direction.y, direction.x);
-                        if (!(angle > -Math.PI*0.98 && angle < -Math.PI*0.02) && !(angle < Math.PI*0.02 && angle > -Math.PI*0.02)) {
-                            newLaunchVelocity = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE); reAimIsValid = true; launchDirection = Vector.clone(newLaunchVelocity);
-                        }}
+                const direction = Vector.sub(endPos, startPos);
+                let newCalculatedDirection = null;
+                let dragIsValidForNewDirection = false;
+
+                // Common logic to validate drag for a new direction
+                if (direction.y > 5 && Vector.magnitudeSquared(direction) > 20 * 20) { // Min drag and generally downward
+                    const angle = Math.atan2(direction.y, direction.x);
+                    if (!(angle > -Math.PI * 0.98 && angle < -Math.PI * 0.02) && !(angle < Math.PI * 0.02 && angle > -Math.PI * 0.02)) { // Not too horizontal
+                        newCalculatedDirection = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
+                        dragIsValidForNewDirection = true;
+                    }
+                }
+
+
+                if (isReAimingDuringLaunchVolley) { // Re-aiming the CURRENT, ONGOING launch volley
+                    isReAimingDuringLaunchVolley = false;
+                    if (dragIsValidForNewDirection) {
+                        launchDirection = Vector.clone(newCalculatedDirection); // Update the global launchDirection immediately
+                        console.log(`Mouseup (Re-Aim DURING Volley): Valid. New launchDirection for rest of volley: ${JSON.stringify(launchDirection)}`);
+                    } else {
+                        console.log(`Mouseup (Re-Aim DURING Volley): Invalid drag. launchDirection for volley remains: ${JSON.stringify(launchDirection)}`);
+                    }
+                    // The setTimeouts for launching will pick up the new launchDirection if it was changed.
+
+                } else if (isPausingForMidTurnBodyReAim) { // Resume from Pause WITH RE-AIM FOR CURRENTLY ACTIVE (PAUSED) BODIES
+                    isPausingForMidTurnBodyReAim = false;
+                    console.log("Mouseup (Re-Aim PAUSED BODIES): Resuming. Attempting to re-aim *paused* balls.");
+                    
+                    let newVelocityForPausedBodies = null;
+                    if (dragIsValidForNewDirection) {
+                        newVelocityForPausedBodies = Vector.clone(newCalculatedDirection);
+                        console.log(`Mouseup (Re-Aim PAUSED BODIES): Valid. New velocity for paused balls: ${JSON.stringify(newVelocityForPausedBodies)}`);
+                    } else {
+                        console.log(`Mouseup (Re-Aim PAUSED BODIES): Invalid drag. Restoring original velocities.`);
+                    }
+
                     activeBalls.forEach((ball) => {
                         if (ball.isStatic && !ball.isReturning && !ball.isHopper && ball.pausedVelocity) {
                              Matter.Body.setStatic(ball, false);
-                             if (reAimIsValid && newLaunchVelocity) { Matter.Body.setVelocity(ball, newLaunchVelocity); }
-                             else { Matter.Body.setVelocity(ball, ball.pausedVelocity); Matter.Body.setAngularVelocity(ball, ball.pausedAngularVelocity || 0); }
+                             if (newVelocityForPausedBodies) { // Only apply if re-aim was valid
+                                 Matter.Body.setVelocity(ball, newVelocityForPausedBodies);
+                                 Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
+                             } else {
+                                 Matter.Body.setVelocity(ball, ball.pausedVelocity);
+                                 Matter.Body.setAngularVelocity(ball, ball.pausedAngularVelocity || 0);
+                             }
                              delete ball.pausedVelocity; delete ball.pausedAngularVelocity;
-                        } else if (ball.isStatic && !ball.isReturning && !ball.isHopper) { Matter.Body.setStatic(ball, false); }
+                        } else if (ball.isStatic && !ball.isReturning && !ball.isHopper) {
+                             Matter.Body.setStatic(ball, false);
+                        }
                     });
                     pauseResumeGraceTicks = PAUSE_RESUME_GRACE_TICKS_TOTAL;
-                } else if (aiming) { // Execute Initial Launch
-                    aiming = false; const direction = Vector.sub(endPos, startPos);
-                    if (direction.y > 5 && Vector.magnitudeSquared(direction) > 40 * 40) {
-                         const angle = Math.atan2(direction.y, direction.x);
-                         if (!(angle > -Math.PI*0.98 && angle < -Math.PI*0.02) && !(angle < Math.PI*0.02 && angle > -Math.PI*0.02)) {
-                            turnInProgress = true; launchInProgressFlag = true; // Set flag
-                            pauseResumeGraceTicks = 0; endTurnPending = false;
-                            launchDirection = Vector.mult(Vector.normalise(direction), LAUNCH_MAGNITUDE);
-                            const countToLaunch = Math.min(hopperBalls.length, nextRoundBallCount);
-                            if (countToLaunch === 0) {
-                                console.error("Launch Error: No balls available to launch (countToLaunch is 0).");
-                                turnInProgress = false; launchInProgressFlag = false; return;
-                            }
-                            currentLaunchCount = countToLaunch;
-                            console.log(`Attempting to launch ${currentLaunchCount} balls. Hopper before: ${hopperBalls.length}, NextRound: ${nextRoundBallCount}`);
-                            const ballsToLaunch = hopperBalls.splice(0, currentLaunchCount);
-                            console.log(`Spliced ${ballsToLaunch.length} balls. Hopper after: ${hopperBalls.length}. activeBalls before adding: ${activeBalls.length}`);
+                    console.log("Mouseup (Re-Aim PAUSED BODIES): Active balls resumed.");
 
-                            ballsToLaunch.forEach((ball, index) => {
-                                ball.isHopper = false; ball.isReturning = false; ball.isMovingHorizontally = false; ball.render.fillStyle = ACTIVE_BALL_COLOR;
-                                delete ball.pausedVelocity; delete ball.pausedAngularVelocity; activeBalls.push(ball);
-                                setTimeout(() => {
-                                    if (!gameOver && !isPausing) {
-                                        Matter.Body.setStatic(ball, false); Matter.Body.setPosition(ball, startPos);
-                                        Matter.Body.setVelocity(ball, launchDirection); Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
-                                    } else {
-                                        console.warn(`Launch for ball ${ball.id} aborted (gameOver=${gameOver}, isPausing=${isPausing}). Returning to hopper.`);
-                                        if (activeBalls.includes(ball)) activeBalls.splice(activeBalls.indexOf(ball), 1);
-                                        if (!hopperBalls.includes(ball)) hopperBalls.unshift(ball);
-                                        Matter.Body.setStatic(ball, true); ball.render.fillStyle = USED_BALL_COLOR; ball.isHopper = true;
-                                        Matter.Body.setPosition(ball, { x: HOPPER_CENTER_X + (Math.random()-0.5)*HOPPER_TARGET_X_OFFSET, y: HOPPER_Y + BALL_RADIUS + (Math.random()-0.5)*HOPPER_TARGET_Y_OFFSET });
-                                    }}, index * LAUNCH_STAGGER_MS);
-                            });
-                            console.log(`All ${currentLaunchCount} balls scheduled for launch. activeBalls.length now: ${activeBalls.length}`);
-                            // Schedule the flag to be reset
-                            const totalLaunchTime = (ballsToLaunch.length > 0 ? (ballsToLaunch.length - 1) * LAUNCH_STAGGER_MS : 0) + (LAUNCH_STAGGER_MS * 2); // Time for last ball to fire + buffer
+                } else if (aiming) { // Execute INITIAL Launch for the new turn's volley
+                    aiming = false; 
+                    if (dragIsValidForNewDirection) {
+                        launchDirection = Vector.clone(newCalculatedDirection); // Set the initial launchDirection for this volley
+                        console.log(`Mouseup (Initial Aim): Valid new aim. Launching with ${JSON.stringify(launchDirection)}.`);
+                        
+                        turnInProgress = true; launchInProgressFlag = true; 
+                        pauseResumeGraceTicks = 0; endTurnPending = false;
+                        
+                        const countToLaunch = Math.min(hopperBalls.length, nextRoundBallCount);
+                        if (countToLaunch === 0) {
+                            console.error("Launch Error: No balls available to launch.");
+                            turnInProgress = false; launchInProgressFlag = false; return;
+                        }
+                        console.log(`Mouseup (Initial Aim): Preparing to launch ${countToLaunch} balls.`);
+                        currentLaunchCount = countToLaunch;
+                        const ballsToLaunch = hopperBalls.splice(0, currentLaunchCount);
+                        
+                        // This counter will be decremented in the setTimeout callback
+                        // to correctly set launchInProgressFlag = false after the *last* ball is processed
+                        let ballsRemainingInVolley = ballsToLaunch.length; 
+
+                        ballsToLaunch.forEach((ball, index) => {
+                            ball.isHopper = false; ball.isReturning = false; ball.isMovingHorizontally = false; ball.render.fillStyle = ACTIVE_BALL_COLOR;
+                            delete ball.pausedVelocity; delete ball.pausedAngularVelocity; activeBalls.push(ball);
                             setTimeout(() => {
-                                launchInProgressFlag = false;
-                                console.log("Launch sequence flag reset.");
-                                // Check if turn should end if all launches failed and balls returned
-                                if (turnInProgress && activeBalls.length === 0 && returningBalls.length === 0 && !isPausing) {
-                                    checkEndTurnCondition();
+                                ballsRemainingInVolley--;
+                                if (!gameOver && !isPausingForMidTurnBodyReAim) { // Check general pause too
+                                    Matter.Body.setStatic(ball, false); Matter.Body.setPosition(ball, startPos);
+                                    // launchDirection could have been updated mid-volley by isReAimingDuringLaunchVolley
+                                    Matter.Body.setVelocity(ball, launchDirection); 
+                                    Matter.Body.setAngularVelocity(ball, (Math.random() - 0.5) * 0.05);
+                                } else { 
+                                    if (activeBalls.includes(ball)) activeBalls.splice(activeBalls.indexOf(ball), 1);
+                                    if (!hopperBalls.includes(ball)) hopperBalls.unshift(ball); 
+                                    Matter.Body.setStatic(ball, true); ball.render.fillStyle = USED_BALL_COLOR; ball.isHopper = true;
+                                    Matter.Body.setPosition(ball, { x: HOPPER_CENTER_X + (Math.random()-0.5)*HOPPER_TARGET_X_OFFSET, y: HOPPER_Y + BALL_RADIUS + (Math.random()-0.5)*HOPPER_TARGET_Y_OFFSET });
                                 }
-                            }, totalLaunchTime);
-                        } else { turnInProgress = false; launchInProgressFlag = false; console.log("Initial launch cancelled - invalid angle."); }
-                    } else { turnInProgress = false; launchInProgressFlag = false; console.log("Initial launch cancelled - drag invalid."); }
+                                if (ballsRemainingInVolley === 0) {
+                                    launchInProgressFlag = false;
+                                    console.log("Initial launch sequence complete (all setTimeouts processed). launchInProgressFlag:", launchInProgressFlag);
+                                    checkEndTurnCondition(); // Check if turn ends immediately after volley
+                                }
+                            }, index * LAUNCH_STAGGER_MS);
+                        });
+                        
+                        if (ballsToLaunch.length === 0) { // Handle case of 0 balls to launch (e.g. if count was 0)
+                            launchInProgressFlag = false;
+                            turnInProgress = false; // No turn if no balls launched
+                             console.log("Initial launch sequence: No balls to launch.");
+                        }
+
+                    } else {
+                        console.log(`Mouseup (Initial Aim): Invalid drag. Launch cancelled. (Angle: ${dragIsValidForNewDirection ? Math.atan2(direction.y, direction.x).toFixed(2) : 'N/A'}, Dist: ${Vector.magnitude(direction).toFixed(1)}, Y: ${direction.y.toFixed(1)})`);
+                        turnInProgress = false; launchInProgressFlag = false;
+                        launchDirection = null;
+                        return; 
+                    }
                 }
             });
             render.canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); });
@@ -507,12 +587,13 @@
                      const leftLineEndX = HOPPER_CENTER_X - CAGE_GAP_WIDTH / 2; const rightLineStartX = HOPPER_CENTER_X + CAGE_GAP_WIDTH / 2;
                      context.moveTo(PLAY_AREA_LEFT, CAGE_Y_POSITION); context.lineTo(leftLineEndX, CAGE_Y_POSITION);
                      context.moveTo(rightLineStartX, CAGE_Y_POSITION); context.lineTo(PLAY_AREA_RIGHT, CAGE_Y_POSITION); context.stroke(); }
-                 if ((aiming || isPausing) && !gameOver) {
+                 // Show aim line if: initial aiming OR re-aiming during volley OR re-aiming paused bodies
+                if ((aiming || isReAimingDuringLaunchVolley || isPausingForMidTurnBodyReAim) && !gameOver) {
                      context.beginPath(); context.strokeStyle = '#000000'; context.lineWidth = 2; context.setLineDash([10, 5]);
                      const dx = mousePos.x - startPos.x; const dy = mousePos.y - startPos.y;
-                     if (dy > 5) {
+                     if (dy > 5) { 
                          const angle = Math.atan2(dy, dx);
-                         if (!(angle > -Math.PI*0.98 && angle < -Math.PI*0.02) && !(angle < Math.PI*0.02 && angle > -Math.PI*0.02)) {
+                         if (!(angle > -Math.PI*0.98 && angle < -Math.PI*0.02) && !(angle < Math.PI*0.02 && angle > -Math.PI*0.02)) { 
                              const length = Math.min(Vector.magnitude({x: dx, y: dy}), 250);
                              context.moveTo(startPos.x, startPos.y); context.lineTo(startPos.x + Math.cos(angle) * length, startPos.y + Math.sin(angle) * length); context.stroke();
                          }} context.setLineDash([]); }
@@ -524,10 +605,11 @@
                  World.clear(world); Engine.clear(engine);
                  engine.gravity.y = 1.0; engine.timing.timeScale = 1; engine.positionIterations = 12; engine.velocityIterations = 12; isSpedUp = false;
                  score = 0; activeBalls = []; returningBalls = []; hopperBalls = []; polygons = [];
-                 gameOver = false; aiming = false; isPausing = false; turnInProgress = false; endTurnPending = false;
-                 launchInProgressFlag = false; // Reset flag
+                 gameOver = false; aiming = false; isPausingForMidTurnBodyReAim = false; turnInProgress = false; endTurnPending = false;
+                 launchInProgressFlag = false; isReAimingDuringLaunchVolley = false;
                  pauseResumeGraceTicks = 0; currentLaunchCount = 0; nextRoundBallCount = 1; round = 1; rowCount = 0;
-                 launchDirection = null; startPos = { x: FIXED_START_X, y: LAUNCH_POINT_Y }; lastRightClickTime = 0; nextReturnPathway = 'left';
+                 launchDirection = null; 
+                 startPos = { x: FIXED_START_X, y: LAUNCH_POINT_Y }; lastRightClickTime = 0; nextReturnPathway = 'left';
                  ballsPendingReturnSetup = [];
 
                  document.getElementById('gameOver').style.display = 'none'; document.getElementById('scoreDisplay').style.display = 'none';
@@ -538,11 +620,65 @@
                     Bodies.rectangle(HOPPER_CENTER_X, CANVAS_HEIGHT + 30, PLAY_AREA_WIDTH, 60, {isStatic:true, isSensor:true, label:'bottomSensor', collisionFilter:{category:defaultCategory, mask:ballCategory}, render:{visible:false}})]);
                  setupInitialBalls(1); createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT); updateBanner();
             }
-             window.addEventListener('keydown', (e) => { if (!e.repeat && (e.key === 'r' || e.key === 'R')) { if (gameOver) restartGame(); } });
+
+            window.addEventListener('keydown', (e) => {
+                if (e.ctrlKey && e.shiftKey && e.code === 'Digit1') { 
+                    e.preventDefault(); 
+                    console.log("CHEAT ACTIVATED: Setting balls to 100");
+                    
+                    const targetBallCount = 100;
+                    nextRoundBallCount = targetBallCount; 
+
+                    const currentHopperCount = hopperBalls.length;
+                    if (currentHopperCount > targetBallCount) {
+                        const ballsToRemoveCount = currentHopperCount - targetBallCount;
+                        const ballsToRemove = hopperBalls.splice(targetBallCount, ballsToRemoveCount); 
+                        World.remove(world, ballsToRemove);
+                    } else if (currentHopperCount < targetBallCount) {
+                        const needed = targetBallCount - currentHopperCount;
+                        for (let i = 0; i < needed; i++) {
+                            const newBall = createBallBody(
+                                HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET * 2,
+                                HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET,
+                                true 
+                            );
+                            Matter.Body.setStatic(newBall, true);
+                            World.add(world, newBall);
+                            hopperBalls.push(newBall);
+                        }
+                    }
+
+                    hopperBalls.forEach(ball => {
+                        if (!ball.isStatic) Matter.Body.setStatic(ball, true);
+                        if (!ball.isHopper) {
+                            ball.isHopper = true;
+                            ball.isReturning = false;
+                            ball.isMovingHorizontally = false;
+                        }
+                        ball.render.fillStyle = USED_BALL_COLOR;
+                        Matter.Body.setPosition(ball, { 
+                            x: HOPPER_CENTER_X + (Math.random() - 0.5) * HOPPER_TARGET_X_OFFSET * 1.5,
+                            y: HOPPER_Y + BALL_RADIUS + (Math.random() - 0.5) * HOPPER_TARGET_Y_OFFSET * 0.8 
+                        });
+                        Matter.Body.setVelocity(ball, {x:0,y:0});
+                        Matter.Body.setAngularVelocity(ball, 0);
+                    });
+
+                    updateBanner(); 
+                }
+
+                if (!e.repeat && (e.key === 'r' || e.key === 'R')) { 
+                    if (gameOver) {
+                        restartGame();
+                    }
+                }
+            });
+
 
             function endTurn() {
-                if (gameOver || isPausing) { endTurnPending = false; return; }
-                turnInProgress = false; endTurnPending = false; launchInProgressFlag = false; // Reset flag
+                if (gameOver || isPausingForMidTurnBodyReAim) { endTurnPending = false; return; }
+                turnInProgress = false; endTurnPending = false; launchInProgressFlag = false; 
+                isReAimingDuringLaunchVolley = false; // Ensure this is reset
 
                 pauseResumeGraceTicks = 0; if (engine.timing.timeScale !== 1) { engine.timing.timeScale = 1; isSpedUp = false; }
                 if (activeBalls.length > 0) { World.remove(world, activeBalls); activeBalls = []; }
@@ -571,7 +707,7 @@
                 const availableSpaceForPolys = MAX_OBJECTS - hopperBalls.length - polygons.length;
                 const polysInRowEstimate = Math.floor((PLAY_AREA_WIDTH - 40) / POLYGON_SPACING) + 1;
                 if (availableSpaceForPolys >= polysInRowEstimate) { createPolygonRow(CANVAS_HEIGHT - ROW_HEIGHT); }
-                round++; aiming = false; isPausing = false; launchDirection = null; currentLaunchCount = 0;
+                round++; aiming = false; isPausingForMidTurnBodyReAim = false; launchDirection = null; currentLaunchCount = 0;
                 updateBanner();
             }
 
